@@ -336,10 +336,15 @@ class ScionLight(torch.optim.Optimizer):
             norm_kwargs = {}
         defaults = dict(lr=lr, momentum=momentum, scale=scale, unconstrained=unconstrained, norm=norm, norm_kwargs=norm_kwargs)
         super().__init__(params, defaults)
+        # Initialize state
+        self._store_grads_in_state()
         # Do not pass `self` through syntactic sugar. We need the
         # argument to not be populated.
-        self.register_state_dict_post_hook(
-            type(self)._store_grads_in_state_dict,
+        self.register_state_dict_pre_hook(
+            type(self)._store_grads_in_state,
+        )
+        self.register_load_state_dict_post_hook(
+            type(self)._load_grads_from_state,
         )
 
     def step(self):
@@ -371,55 +376,16 @@ class ScionLight(torch.optim.Optimizer):
                 init_func(p)
                 p.data *= scale
 
-    def _store_grads_in_state_dict(self, state_dict):
-        grad_states: dict[int, torch.Tensor] = {}
+    def _store_grads_in_state(self):
+        for group in self.param_groups:
+            for param in group['params']:
+                if isinstance(param, torch.Tensor):
+                    self.state.setdefault(param, {})['grad_state'] = param.grad
 
-        groups = self.param_groups
-        saved_groups = state_dict['param_groups']
-
-        id_map = dict(
-            zip(
-                chain.from_iterable(g['params'] for g in saved_groups),
-                chain.from_iterable(g['params'] for g in groups),
-            )
-        )
-
-        for saved_group in saved_groups:
-            for param_index in saved_group['params']:
-                if param_index not in grad_states:
-                    param = id_map[param_index]
-                    grad_states[param_index] = (
-                        param.grad.detach()
-                        if param.grad is not None
-                        else None
-                    )
-
-        state_dict['grad_states'] = grad_states
-
-    # The following couldn't be implemented as a post-load hook, but
-    # we'd prefer to do it _after_ the parent class's loading for
-    # safety.
-    @torch._disable_dynamo
-    def load_state_dict(self, state_dict):
-        super().load_state_dict(state_dict)
-
-        groups = self.param_groups
-        saved_groups = state_dict['param_groups']
-
-        id_map = dict(
-            zip(
-                chain.from_iterable(g['params'] for g in saved_groups),
-                chain.from_iterable(g['params'] for g in groups),
-            )
-        )
-
-        grad_states: dict[int, torch.Tensor] = state_dict['grad_states']
-
-        for saved_group in saved_groups:
-            for param_index in saved_group['params']:
-                if param_index in grad_states:
-                    param = id_map[param_index]
-                    param.grad = grad_states[param_index]
+    def _load_grads_from_state(self):
+        for (param, state) in self.state.items():
+            if 'grad_state' in state:
+                param.grad = state['grad_state']
 
 
 @torch.compile
