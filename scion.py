@@ -377,13 +377,15 @@ class ScionLight(torch.optim.Optimizer):
     def _store_grads_in_state(self):
         for group in self.param_groups:
             for param in group['params']:
-                if isinstance(param, torch.Tensor):
+                if isinstance(param, torch.Tensor) and param.grad is not None:
                     self.state.setdefault(param, {})['grad_state'] = param.grad
 
     def _load_grads_from_state(self):
         for (param, state) in self.state.items():
             if 'grad_state' in state:
                 param.grad = state['grad_state']
+            elif isinstance(param, torch.Tensor):
+                param.grad = None
 
 
 @torch.compile
