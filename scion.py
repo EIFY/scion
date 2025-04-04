@@ -374,6 +374,14 @@ class ScionLight(torch.optim.Optimizer):
                 init_func(p)
                 p.data *= scale
 
+    def __getstate__(self):
+        self._store_grads_in_state()
+        return super().__getstate__()
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self._load_grads_from_state()
+
     def _store_grads_in_state(self):
         for group in self.param_groups:
             for param in group['params']:
