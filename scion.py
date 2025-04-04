@@ -1,4 +1,6 @@
+from itertools import chain
 import math
+
 import torch
 
 
@@ -334,6 +336,11 @@ class ScionLight(torch.optim.Optimizer):
             norm_kwargs = {}
         defaults = dict(lr=lr, momentum=momentum, scale=scale, unconstrained=unconstrained, norm=norm, norm_kwargs=norm_kwargs)
         super().__init__(params, defaults)
+        # Do not pass `self` through syntactic sugar. We need the
+        # argument to not be populated.
+        self.register_state_dict_post_hook(
+            type(self)._store_grads_in_state_dict,
+        )
 
     def step(self):
         for group in self.param_groups:
@@ -363,6 +370,56 @@ class ScionLight(torch.optim.Optimizer):
             for p in group['params']:
                 init_func(p)
                 p.data *= scale
+
+    def _store_grads_in_state_dict(self, state_dict):
+        grad_states: dict[int, torch.Tensor] = {}
+
+        groups = self.param_groups
+        saved_groups = state_dict['param_groups']
+
+        id_map = dict(
+            zip(
+                chain.from_iterable(g['params'] for g in saved_groups),
+                chain.from_iterable(g['params'] for g in groups),
+            )
+        )
+
+        for saved_group in saved_groups:
+            for param_index in saved_group['params']:
+                if param_index not in grad_states:
+                    param = id_map[param_index]
+                    grad_states[param_index] = (
+                        param.grad.detach()
+                        if param.grad is not None
+                        else None
+                    )
+
+        state_dict['grad_states'] = grad_states
+
+    # The following couldn't be implemented as a post-load hook, but
+    # we'd prefer to do it _after_ the parent class's loading for
+    # safety.
+    @torch._disable_dynamo
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+
+        groups = self.param_groups
+        saved_groups = state_dict['param_groups']
+
+        id_map = dict(
+            zip(
+                chain.from_iterable(g['params'] for g in saved_groups),
+                chain.from_iterable(g['params'] for g in groups),
+            )
+        )
+
+        grad_states: dict[int, torch.Tensor] = state_dict['grad_states']
+
+        for saved_group in saved_groups:
+            for param_index in saved_group['params']:
+                if param_index in grad_states:
+                    param = id_map[param_index]
+                    param.grad = grad_states[param_index]
 
 
 @torch.compile
