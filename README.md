@@ -69,16 +69,16 @@ Below are some pseudocode configurations for different architectures and domains
         'params': output_layer,
         'norm': 'Sign',
         'norm_kwargs': {'normalized': True},
-        'scale': radius*100.0,
+        'scale': radius*2**10.0,
     }]
     optimizer = Scion(optim_groups, lr=2**-6, momentum=0.1)
     optimizer.init()
     ```
 
-- CNN:
+- CNN (see [`examples/airbench`](examples/airbench) for further details):
 
     ```python
-    radius = 1.0
+    radius = 8.0
     optim_groups = [{
         'params': remaining_parameters,
         'norm': 'Auto', # Picks layerwise norm based on the parameter shape
@@ -88,10 +88,9 @@ Below are some pseudocode configurations for different architectures and domains
         'params': output_layer,
         'norm': 'Sign',
         'norm_kwargs': {'normalized': True},
-        'scale': radius*100.0,
+        'scale': radius*16,
     }]
     optimizer = Scion(optim_groups, lr=2**-4, momentum=0.5)
-    optimizer.init()
     ```
 
 
