@@ -18,112 +18,12 @@ import torch.distributed as dist
 import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-# -----------------------------------------------------------------------------
-# Scion optimizer
+import wandb
 
-def zeroth_power_via_svd(G):
-   U, S, V = G.svd()
-   return U @ V.T
-
-@torch.compile
-def zeropower_via_newtonschulz5(G, steps=5):
-    """
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
-    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
-    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
-    zero even beyond the point where the iteration no longer converges all the way to one everywhere
-    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
-    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
-    performance at all relative to UV^T, where USV^T = G is the SVD.
-    """
-    assert len(G.shape) == 2
-    a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    if G.size(0) > G.size(1):
-        X = X.T
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm() + 1e-7)
-    # Perform the NS iterations
-    for _ in range(steps):
-        A = X @ X.T
-        B = b * A + c * A @ A # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
-    
-    if G.size(0) > G.size(1):
-        X = X.T
-    return X
-
-
-class Norm(object):
-    def lmo(self, g):
-        raise NotImplementedError
-
-
-class Spectral(Norm):
-    def __init__(self, steps=5):
-        self.steps = steps
-
-    def lmo(self, g):
-        g = zeropower_via_newtonschulz5(g.reshape(len(g), -1), steps=self.steps).view(g.shape)
-        d_out, d_in = g.shape
-        g *= (d_out / d_in)**0.5
-        return g
-
-
-class Sign(Norm):
-    def __init__(self, zero_init=False):
-        self.zero_init = zero_init
-
-    def lmo(self, g):
-        out_channels, in_channels = g.shape     # in_channels=768
-        return (1/in_channels)*torch.sign(g)    
-
-
-norm_dict = {
-    'Spectral': Spectral,
-    'Sign': Sign
-}
-
-
-class Scion(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, momentum=1.0, norm: str='Spectral', norm_kwargs: dict=None, scale=1.0, unconstrained=False):
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}")
-        if momentum < 0.0:
-            raise ValueError(f"Invalid momentum value: {momentum}")
-        defaults = dict(lr=lr, momentum=momentum, scale=scale, unconstrained=unconstrained)
-        super().__init__(params, defaults)
-
-    def step(self):
-        for group in self.param_groups:
-            lr = group['lr']
-            momentum = group['momentum']
-            scale = group['scale']
-            unconstrained = group['unconstrained']
-            norm_backend = norm_dict[group['norm']](**group['norm_kwargs'])
-            for p in group['params']:
-                g = p.grad
-                if g is None:
-                    continue
-                state = self.state[p]
-
-                if momentum != 1:
-                    if 'momentum_buffer' not in state.keys():
-                        state['momentum_buffer'] = torch.zeros_like(g)
-                    buf = state['momentum_buffer']
-                    buf.mul_(1-momentum).add_(g, alpha=momentum)
-                    g = buf
-
-                update = scale * norm_backend.lmo(g)
-                if unconstrained:
-                    p.data.add_(update, alpha=-lr)  # Unconstrained Scion
-                else:
-                    p.data.mul_(1-lr).add_(update, alpha=-lr) # Scion
-
+from scion import Scion
 
 # -----------------------------------------------------------------------------
-# PyTorch nn.Module definitions for the GPT-2 model
+# PyTorch nn.Module definitions for modded-nanogpt
 
 class Rotary(torch.nn.Module):
 
@@ -337,26 +237,27 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data hyperparams
-    input_bin : str = 'data/fineweb-edu10B/fineweb_edu_train_*.bin' # input .bin to train on
-    input_val_bin : str = 'data/fineweb-edu10B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
+    name : str = 'fineweb_edu_100B_scion_corrected_minus_12_wd'
+    input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
+    input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
     batch_size : int = 8*64 # batch size, in sequences, across all devices
     device_batch_size : int = 64 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
-    learning_rate : float = 0.00036
+    learning_rate : float = 2 ** -12 * 50
+    corrected = True
+    sign_lr : float = 2 ** -12 * 3000
+    head_corrected = False
+    exact = False
     warmup_iters : int = 0
-    warmdown_iters : int = 1450 # number of iterations of linear warmup/warmdown for triangular or trapezoidal schedule
-    weight_decay : float = 0
+    weight_decay : float = 2 ** -12
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
     n_layer : int = 12
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
-    unconstrained = False
     momentum: float = 0.1
-    scale : float = 50
-    last_scale : float = 3000
 
 from datargs import parse
 
@@ -414,39 +315,78 @@ def main():
     ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
     # init the optimizer(s)
-    optim_groups = [{
-        'params': raw_model.transformer.h.parameters(),
+    optim_groups = [
+        {
+            'params': raw_model.transformer.h.parameters(),
             'norm': 'Spectral',
             'norm_kwargs': {'steps': 5},
-            'scale': args.scale,
-    }, {
-        'params': raw_model.lm_head.parameters(),
-        'norm': 'Sign',
-        'norm_kwargs': {},
-        'scale': args.last_scale,
-    }
+            'lr': args.learning_rate,
+            'corrected': args.corrected,
+        }, {
+            'params': raw_model.lm_head.parameters(),
+            'norm': 'Sign',
+            'norm_kwargs': {},
+            'lr': args.sign_lr,
+            'corrected': args.head_corrected,
+        }
     ]
-    optimizer1 = Scion(optim_groups, lr=args.learning_rate, momentum=args.momentum, unconstrained=args.unconstrained)
+
+    def wd_scheduler(max_wd, max_lr, corrected, exact):
+
+        def uncorrected_wd(lr):
+            return max_wd
+
+        def corrected_wd(lr):
+            return max_wd * lr / max_lr
+
+        c = max_lr / max_wd / (2 - max_lr * max_wd) if max_wd > 0 else 0.
+
+        def exact_wd(lr):
+            if lr <= 0 or c <= 0:
+                return 0.
+            return (1 - math.sqrt(1 - lr ** 2 / c)) / lr
+
+        if corrected:
+            return exact_wd if exact else corrected_wd
+        else:
+            return uncorrected_wd
+
+    wd_schedulers = [
+        wd_scheduler(wd / lr, lr, c, args.exact) for wd, lr, c in [
+            (args.weight_decay, args.learning_rate, args.corrected),
+            (args.weight_decay, args.sign_lr, args.head_corrected)
+        ]
+    ]
+    optimizer1 = Scion(optim_groups, dict(momentum=args.momentum), rank=ddp_rank, world_size=ddp_world_size)
     optimizers = [optimizer1]
 
-    # learning rate decay scheduler (linear warmup and warmdown)
+    # learning rate decay scheduler (linear warmup and cosine annealing)
     def get_lr(it):
         assert it <= args.num_iterations
         # 1) linear warmup for warmup_iters steps
         if it < args.warmup_iters:
             return (it+1) / args.warmup_iters
-        # 2) constant lr for a while
-        elif it < args.num_iterations - args.warmdown_iters:
-            return 1.0
-        # 3) linear warmdown
+        # 2) cosine annealing schedule
         else:
-            decay_ratio = (args.num_iterations - it) / args.warmdown_iters
+            it -= args.warmup_iters
+            cosine_steps = args.num_iterations - args.warmup_iters
+            decay_ratio = 0.5 * (1 + math.cos(it * math.pi / cosine_steps))
             return decay_ratio
     schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, get_lr) for opt in optimizers]
+
+    for group, wd_sched in zip(optimizer1.param_groups, wd_schedulers):
+        group['weight_decay'] = wd_sched(group['lr'])
 
     # begin logging
     if master_process:
         run_id = str(uuid.uuid4())
+        wandb.init(
+            project="modded-nanogpt",
+            name=args.name,
+            id=run_id,
+            resume='auto',
+            config=vars(args),
+        )
         logdir = 'logs/%s/' % run_id
         os.makedirs(logdir, exist_ok=True)
         logfile = 'logs/%s.txt' % run_id
@@ -499,9 +439,18 @@ def main():
             val_loss /= val_steps
             # log val loss to console and to logfile
             if master_process:
-                print(f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms')
+
+                log_data = {}
+                log_data['spectral_norm'], log_data['sign_norm'] = optimizer1.report_norms()
+                log_data["val/loss"] = val_loss
+                l2_params = sum(p.data.square().sum().item() for p in model.parameters())
+                log_data["l2_params"] = math.sqrt(l2_params)
+                wandb.log(log_data, step=step)
+
+                log_line = f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms'
+                print(log_line)
                 with open(logfile, "a") as f:
-                    f.write(f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms\n')
+                    f.write(log_line + '\n')
             # start the clock again
             torch.cuda.synchronize()
             t0 = time.time()
@@ -513,6 +462,8 @@ def main():
             # save the state of the training process
             log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
             torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
+            optimizer1.remove_unused_keys()
+            torch.cuda.empty_cache()
             # start the clock again
             torch.cuda.synchronize()
             t0 = time.time()
@@ -545,6 +496,8 @@ def main():
         for opt, sched in zip(optimizers, schedulers):
             opt.step()
             sched.step()
+        for group, wd_sched in zip(optimizer1.param_groups, wd_schedulers):
+            group['weight_decay'] = wd_sched(group['lr'])
         # null the gradients
         model.zero_grad(set_to_none=True)
         # --------------- TRAINING SECTION END -------------------
@@ -552,10 +505,12 @@ def main():
 
         #dist.all_reduce(train_loss, op=dist.ReduceOp.AVG) # all-reducing the training loss would be more correct in terms of logging, but slower
         if master_process:
+            wandb.log({"train/loss": train_loss.item()}, step=step + 1)
             approx_time = training_time_ms + 1000 * (time.time() - t0)
-            print(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms")
+            log_line = f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
+            print(log_line)
             with open(logfile, "a") as f:
-                f.write(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms\n")
+                f.write(log_line + "\n")
 
     if master_process:
         print(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
