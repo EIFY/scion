@@ -60,9 +60,9 @@ class Spectral(Norm):
     def norm(self, w, v, repeat=1):
         for _ in range(repeat):
             u = w @ v
-            u /= torch.linalg.vector_norm(u, dim=-2, keepdim=True)
+            u /= (torch.linalg.vector_norm(u, dim=-2, keepdim=True) + eps)
             v = w.mT @ u
-            s = torch.linalg.vector_norm(v, dim=-2, keepdim=True)
+            s = torch.linalg.vector_norm(v, dim=-2, keepdim=True) + eps
             v /= s
         scale = self.scale(*w.shape[-2:])
         return s / scale, v
@@ -294,6 +294,7 @@ class Scion(torch.optim.Optimizer):
                     sign.append(norm.item())
         return math.prod(spectral) ** (1 / len(spectral)), math.fsum(sign) / len(sign)
 
+    @torch.no_grad()
     def init(self):
         init_dtype = torch.float32 if torch.backends.mps.is_available() else torch.float64
         for group, norm_backend, p in self.assigned_parameters():
