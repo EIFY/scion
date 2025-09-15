@@ -447,18 +447,21 @@ def main():
             torch.cuda.synchronize()
             t0 = time.time()
 
-        if master_process and (last_step or (args.save_every > 0 and step % args.save_every == 0)):
-            # stop the clock
-            torch.cuda.synchronize()
-            training_time_ms += 1000 * (time.time() - t0)
-            # save the state of the training process
-            log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
+        if last_step or (args.save_every > 0 and step % args.save_every == 0):
+            if master_process:
+                # stop the clock
+                torch.cuda.synchronize()
+                training_time_ms += 1000 * (time.time() - t0)
+                # save the state of the training process
+                log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+                torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
+                # start the clock again
+                torch.cuda.synchronize()
+                t0 = time.time()
+            else:
+                optimizer1.state_dict()  # All processes need to run state_dict() to sync state
             optimizer1.remove_unused_keys()
             torch.cuda.empty_cache()
-            # start the clock again
-            torch.cuda.synchronize()
-            t0 = time.time()
 
         # bit confusing: we want to make sure to eval on 0th iteration
         # but also after the very last iteration. so we loop for step <= num_iterations
