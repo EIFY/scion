@@ -227,8 +227,8 @@ class Hyperparameters:
     input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
     input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
-    batch_size : int = 8*64 # batch size, in sequences, across all devices
-    device_batch_size : int = 64 # batch size, in sequences, per device
+    batch_size : int = 8*32 # batch size, in sequences, across all devices
+    device_batch_size : int = 32 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
     learning_rate : float = 2 ** -12 * 50
     corrected = True
@@ -438,6 +438,9 @@ def main():
                 print(log_line)
                 with open(logfile, "a") as f:
                     f.write(log_line + '\n')
+            else:
+                optimizer1.report_norms()  # All processes need to run report_norms() to sync state for norm
+
             # start the clock again
             torch.cuda.synchronize()
             t0 = time.time()
