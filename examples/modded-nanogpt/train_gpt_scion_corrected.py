@@ -344,6 +344,7 @@ def main():
         ]
     ]
     optimizer1 = Scion(optim_groups, dict(momentum=args.momentum), rank=ddp_rank, world_size=ddp_world_size)
+    optimizer1.init()
     optimizers = [optimizer1]
 
     # learning rate decay scheduler (linear warmup and cosine annealing)

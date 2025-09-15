@@ -68,19 +68,10 @@ class Spectral(Norm):
         return s / scale, v
 
     def init(self, w, init_dtype=torch.float64):
-        w_fp = w.data.to(init_dtype)
-        l = [range(s) for s in w_fp.shape[:-2]]
-        l.append([...])
-        for index in itertools.product(*l):
-            torch.nn.init.orthogonal_(w_fp[index])
-        scale = self.scale(*w.shape[-2:])
-        w_fp.mul_(scale)
-        w.data = w_fp.to(dtype=w.data.dtype)
-        v_shape = w_fp.shape[:-2] + (w_fp.shape[-1], 1)
-        v = torch.normal(0, 1, v_shape)
+        v_shape = w.shape[:-2] + (w.shape[-1], 1)
+        v = torch.normal(0, 1, v_shape).to(w)
         v /= torch.linalg.vector_norm(v, dim=-2, keepdim=True)
-        s = torch.ones(w_fp.shape[:-2] + (1, 1))
-        return s.to(w), v.to(w)
+        return self.norm(w, v)
 
     def norm_shape(self, w):
         return w.shape[:-2] + (1, 1)
@@ -121,15 +112,8 @@ class Sign(Norm):
         return norm, v
 
     def init(self, w, init_dtype=torch.float64):
-        if self.zero_init:
-            torch.nn.init.zeros_(w)
-        else:
-            # Generate -1/fan_in or 1/fan_in uniformly at random
-            w.data = (torch.randint(0, 2, w.shape).to(w) * 2 - 1)
-            if self.normalized:
-                d_out, d_in = w.shape
-                w.data /= d_in
-        return torch.tensor(not self.zero_init).to(w), w.new_empty((0,))
+        v = w.new_empty((0,))
+        return self.norm(w, v)
 
     def norm_shape(self, w):
         return ()
