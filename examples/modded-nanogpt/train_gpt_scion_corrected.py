@@ -441,7 +441,7 @@ def main():
                 with open(logfile, "a") as f:
                     f.write(log_line + '\n')
             else:
-                optimizer1.report_norms()  # All processes need to run report_norms() to sync state for norm
+                optimizer1.sync_state_for('norm')
 
             # start the clock again
             torch.cuda.synchronize()
@@ -459,7 +459,7 @@ def main():
                 torch.cuda.synchronize()
                 t0 = time.time()
             else:
-                optimizer1.state_dict()  # All processes need to run state_dict() to sync state
+                optimizer1.sync_state()
             optimizer1.remove_unused_keys()
             torch.cuda.empty_cache()
 
