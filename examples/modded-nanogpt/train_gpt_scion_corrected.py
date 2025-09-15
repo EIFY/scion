@@ -237,6 +237,7 @@ class Hyperparameters:
     exact = False
     warmup_iters : int = 0
     weight_decay : float = 2 ** -12
+    grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
     save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
@@ -484,6 +485,9 @@ def main():
                 loss.backward() # just sync on the last step
         for p in model.parameters():
             p.grad /= train_accumulation_steps
+
+        l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+
         # step the optimizers and schedulers
         for opt, sched in zip(optimizers, schedulers):
             opt.step()
@@ -497,7 +501,7 @@ def main():
 
         #dist.all_reduce(train_loss, op=dist.ReduceOp.AVG) # all-reducing the training loss would be more correct in terms of logging, but slower
         if master_process:
-            wandb.log({"train/loss": train_loss.item()}, step=step + 1)
+            wandb.log({"train/loss": train_loss.item(), "l2_grads": l2_grads.item()}, step=step + 1)
             approx_time = training_time_ms + 1000 * (time.time() - t0)
             log_line = f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
             print(log_line)
