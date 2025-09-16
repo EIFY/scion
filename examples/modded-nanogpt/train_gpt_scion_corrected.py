@@ -513,7 +513,6 @@ def main():
 
     if master_process:
         print(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
-        run.finish()
 
     # -------------------------------------------------------------------------
     # clean up nice
