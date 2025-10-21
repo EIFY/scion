@@ -30,7 +30,7 @@ Architectural changes:
 ## Examples
 
 For runnable examples see [`examples/`](examples/).
-Below are some pseudocode configurations for different architectures and domains (see [Appendix E.3](https://arxiv.org/pdf/2502.07529) for exact parameter choices):
+Below are some pseudocode configurations for different architectures and domains (see [Appendix E.4](https://arxiv.org/pdf/2502.07529) for exact parameter choices):
 
 
 - nanoGPT with weight sharing:
