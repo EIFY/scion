@@ -17,7 +17,7 @@ cp -r main_scion.py scion.py deit/
 
 4. Train DeiT-base model:
 ```
-torchrun --nnodes=4 --nproc_per_node=4 main_scion.py --model deit_base_patch16_224 --epochs 200 --output_dir path2checkpoints_scion --batch-size 256 --lr 8e-5 --min-lr 1e-7 --warmup-epochs 0
+torchrun --nnodes=4 --nproc_per_node=4 main_scion.py --model deit_base_patch16_224 --epochs 200 --output_dir path2checkpoints_scion --batch-size 256 --lr 8e-5 --min-lr 1e-7 --warmup-epochs 0 --data-path "path_to_imagenet"
 ```
 This should give
 ```

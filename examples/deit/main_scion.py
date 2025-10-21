@@ -154,7 +154,7 @@ def get_args_parser():
     parser.add_argument('--attn-only', action='store_true') 
     
     # Dataset parameters
-    parser.add_argument('--data-path', default='/iopsstor/scratch/cscs/ppuigdem/datasets/imagenet/', type=str,
+    parser.add_argument('--data-path', default='./imagenet/', type=str,
                         help='dataset path')
     parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19'],
                         type=str, help='Image Net dataset path')
