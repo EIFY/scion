@@ -18,8 +18,6 @@ import torch.distributed as dist
 import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import wandb
-
 from scion import Scion
 
 # -----------------------------------------------------------------------------
@@ -223,19 +221,19 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data hyperparams
-    name : str = 'fineweb_edu_100B_scion_corrected_minus_12_wd'
-    input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
-    input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
+    input_bin : str = '/data/fineweb10B/fineweb_train_*.bin' # input .bin to train on
+    input_val_bin : str = '/data/fineweb10B/fineweb_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
-    batch_size : int = 8*32 # batch size, in sequences, across all devices
-    device_batch_size : int = 32 # batch size, in sequences, per device
+    batch_size : int = 8 # batch size, in sequences, across all devices
+    device_batch_size : int = 8 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
+    num_iterations : int = 0 # number of iterations to run
     learning_rate : float = 2 ** -12 * 50
     corrected = True
     sign_lr : float = 2 ** -12 * 3000
     head_corrected = False
     exact = False
-    warmup_iters : int = 0
+    warmup_iters : int = 1
     weight_decay : float = 2 ** -12
     grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
@@ -284,7 +282,6 @@ def main():
     tokens_per_global_batch = B * T * ddp_world_size
     val_steps = val_loader.ntok_total // tokens_per_global_batch
     args.val_tokens = val_steps * tokens_per_global_batch
-    args.num_iterations = train_loader.ntok_total // tokens_per_global_batch
 
     x, y = train_loader.next_batch()
 
@@ -368,13 +365,6 @@ def main():
     # begin logging
     if master_process:
         run_id = str(uuid.uuid4())
-        wandb.init(
-            project="modded-nanogpt",
-            name=args.name,
-            id=run_id,
-            resume='auto',
-            config=vars(args),
-        )
         logdir = 'logs/%s/' % run_id
         os.makedirs(logdir, exist_ok=True)
         logfile = 'logs/%s.txt' % run_id
@@ -434,7 +424,6 @@ def main():
                 log_data["val/loss"] = val_loss
                 l2_params = sum(p.data.square().sum().item() for p in model.parameters())
                 log_data["l2_params"] = math.sqrt(l2_params)
-                wandb.log(log_data, step=step)
 
                 log_line = f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms'
                 print(log_line)
@@ -504,7 +493,6 @@ def main():
 
         #dist.all_reduce(train_loss, op=dist.ReduceOp.AVG) # all-reducing the training loss would be more correct in terms of logging, but slower
         if master_process:
-            wandb.log({"train/loss": train_loss.item(), "l2_grads": l2_grads.item()}, step=step + 1)
             approx_time = training_time_ms + 1000 * (time.time() - t0)
             log_line = f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
             print(log_line)
