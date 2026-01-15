@@ -129,7 +129,7 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying # CHANGE
 
-    def forward(self, idx):
+    def forward(self, idx, target):
 
         # forward the GPT model itself
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
@@ -138,7 +138,8 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         logits = self.lm_head(x)
         logits = logits.float() # use tf32/fp32 for logits
-        return logits
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
+        return loss
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -224,8 +225,8 @@ class Hyperparameters:
     input_bin : str = '/data/fineweb10B/fineweb_train_*.bin' # input .bin to train on
     input_val_bin : str = '/data/fineweb10B/fineweb_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
-    batch_size : int = 8 # batch size, in sequences, across all devices
-    device_batch_size : int = 8 # batch size, in sequences, per device
+    batch_size : int = 16 # batch size, in sequences, across all devices
+    device_batch_size : int = 16 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
     num_iterations : int = 3 # number of iterations to run
     learning_rate : float = 2 ** -12 * 50
@@ -414,9 +415,7 @@ def main():
             for _ in range(val_steps):
                 x_val, y_val = val_loader.next_batch()
                 with ctx: # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
-                    logits = model(x_val)
-                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y_val.view(-1), ignore_index=-1)
-                    del logits
+                    loss = model(x_val, y_val)
                     val_loss += loss.detach()
                     del loss
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
@@ -470,9 +469,7 @@ def main():
         for i in range(1, train_accumulation_steps+1):
             # forward pass
             with ctx:
-                logits = model(x)
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=-1)
-                del logits
+                loss = model(x, y)
                 train_loss = loss.detach()
             # advance the dataset for the next batch
             x, y = train_loader.next_batch()
