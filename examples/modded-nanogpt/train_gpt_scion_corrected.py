@@ -418,6 +418,7 @@ def main():
                 with ctx as _, torch.no_grad() as _:
                     logits = model(x_val)
                     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y_val.view(-1), ignore_index=-1)
+                    del logits
                     val_loss += loss.detach()
                     del loss
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
@@ -473,6 +474,7 @@ def main():
             with ctx:
                 logits = model(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=-1)
+                del logits
                 train_loss = loss.detach()
             # advance the dataset for the next batch
             x, y = train_loader.next_batch()
@@ -482,6 +484,7 @@ def main():
                     loss.backward()
             else:
                 loss.backward() # just sync on the last step
+            del loss
         for p in model.parameters():
             p.grad /= train_accumulation_steps
 
