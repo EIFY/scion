@@ -103,9 +103,7 @@ class Block(nn.Module):
 
     def forward(self, x):
         x = x + self.attn(F.rms_norm(x, (x.size(-1),)))
-        print(f"After attn: {torch.cuda.memory_allocated() // 1024 // 1024} MiB")
         x = x + self.mlp(F.rms_norm(x, (x.size(-1),)))
-        print(f"After mlp: {torch.cuda.memory_allocated() // 1024 // 1024} MiB")
         return x
 
 # -----------------------------------------------------------------------------
@@ -226,8 +224,8 @@ class Hyperparameters:
     input_bin : str = '/data/fineweb10B/fineweb_train_*.bin' # input .bin to train on
     input_val_bin : str = '/data/fineweb10B/fineweb_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
-    batch_size : int = 16 # batch size, in sequences, across all devices
-    device_batch_size : int = 16 # batch size, in sequences, per device
+    batch_size : int = 8 # batch size, in sequences, across all devices
+    device_batch_size : int = 8 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
     num_iterations : int = 3 # number of iterations to run
     learning_rate : float = 2 ** -12 * 50
@@ -294,7 +292,7 @@ def main():
     model = model.cuda()
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True # suggested by @Chillee
-    # model = torch.compile(model)
+    model = torch.compile(model)
     # here we wrap model into DDP container
     model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module # always contains the "raw" unwrapped model
@@ -415,7 +413,7 @@ def main():
             val_loss = 0.0
             for _ in range(val_steps):
                 x_val, y_val = val_loader.next_batch()
-                with ctx as _, torch.no_grad() as _:
+                with ctx: # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
                     logits = model(x_val)
                     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y_val.view(-1), ignore_index=-1)
                     del logits
