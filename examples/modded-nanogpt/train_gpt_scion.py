@@ -208,7 +208,9 @@ class Block(nn.Module):
 
     def forward(self, x):
         x = x + self.attn(F.rms_norm(x, (x.size(-1),)))
+        # print(f"After attn: {torch.cuda.memory_allocated() // 1024 // 1024} MiB")
         x = x + self.mlp(F.rms_norm(x, (x.size(-1),)))
+        # print(f"After mlp: {torch.cuda.memory_allocated() // 1024 // 1024} MiB")
         return x
 
 # -----------------------------------------------------------------------------
@@ -463,7 +465,6 @@ if master_process:
         f.write(f'{result.stdout}\n')
         f.write('='*100 + '\n')
     file_prefix = f'unmodified_bs_{args.device_batch_size}'
-    torch.cuda.memory._record_memory_history()
 
 training_time_ms = 0
 # start the clock
@@ -471,6 +472,10 @@ torch.cuda.synchronize()
 t0 = time.time()
 # begin training
 train_loader.reset()
+
+print(f"Just model: {torch.cuda.memory_allocated() // 1024 // 1024} MiB")
+val_steps = 1
+
 for step in range(args.num_iterations + 1):
     last_step = (step == args.num_iterations)
     # This effectively ignores timing first 10 steps, which are slower for weird reasons.
@@ -559,11 +564,6 @@ for step in range(args.num_iterations + 1):
             f.write(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms\n")
 
 if master_process:
-    try:
-       torch.cuda.memory._dump_snapshot(f"{file_prefix}.pickle")
-    except Exception as e:
-       logger.error(f"Failed to capture memory snapshot {e}")
-    torch.cuda.memory._record_memory_history(enabled=None)
     print(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
 
 # -------------------------------------------------------------------------
