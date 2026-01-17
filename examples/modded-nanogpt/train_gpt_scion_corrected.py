@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
+from liger_kernel.transformers.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyLoss
 
 from scion import Scion
 
@@ -128,6 +129,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying # CHANGE
+        self.ce_loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-1, accum_dtype=torch.float32)
 
     def forward(self, idx, target):
 
@@ -136,10 +138,11 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = F.rms_norm(x, (x.size(-1),))
-        logits = self.lm_head(x)
-        logits = logits.float() # use tf32/fp32 for logits
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
-        return loss
+        return self.ce_loss(self.lm_head.weight, x.view(-1, x.size(-1)), target.view(-1))
+        # logits = self.lm_head(x)
+        # logits = logits.float() # use tf32/fp32 for logits
+        # loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
+        # return loss
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
