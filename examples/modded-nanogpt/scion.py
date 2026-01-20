@@ -50,8 +50,7 @@ class Spectral(Norm):
 
     def lmo(self, g):
         g = PolarExpress(g, steps=self.steps)
-        g *= self.scale(*g.shape[-2:])
-        return g
+        return g * g.new_tensor(self.scale(*g.shape[-2:]))
 
     def dual_norm(self, g):
         return torch.sum(self.lmo(g) * g, dim=(-2, -1), keepdim=True)

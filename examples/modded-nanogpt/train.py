@@ -8,6 +8,7 @@ import uuid
 import glob
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import math
 import numpy as np
@@ -223,13 +224,14 @@ class DistributedDataLoader:
 @dataclass
 class Hyperparameters:
     # data hyperparams
-    name : str = 'fineweb_edu_100B_scion_corrected_minus_12_wd'
+    name : Optional[str] = None
     input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
     input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
     batch_size : int = 8*32 # batch size, in sequences, across all devices
     device_batch_size : int = 32 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
+    num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
     learning_rate : float = 2 ** -12 * 50
     corrected = True
     sign_lr : float = 2 ** -12 * 3000
@@ -240,6 +242,7 @@ class Hyperparameters:
     grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
+    val_tokens : int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons.
     save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
     n_layer : int = 12
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
@@ -282,9 +285,16 @@ def main():
         print(f"Validation DataLoader: total number of tokens: {val_loader.ntok_total} across {len(val_loader.files)} files")
 
     tokens_per_global_batch = B * T * ddp_world_size
-    val_steps = val_loader.ntok_total // tokens_per_global_batch
-    args.val_tokens = val_steps * tokens_per_global_batch
-    args.num_iterations = train_loader.ntok_total // tokens_per_global_batch
+    if not args.val_tokens:
+        val_steps = val_loader.ntok_total // tokens_per_global_batch
+        args.val_tokens = val_steps * tokens_per_global_batch
+    else:
+        # calculate the number of steps to take in the val loop.
+        assert args.val_tokens % tokens_per_global_batch == 0
+        val_steps = args.val_tokens // tokens_per_global_batch
+
+    if not args.num_iterations:
+        args.num_iterations = train_loader.ntok_total // tokens_per_global_batch
 
     x, y = train_loader.next_batch()
 
@@ -368,6 +378,8 @@ def main():
     # begin logging
     if master_process:
         run_id = str(uuid.uuid4())
+        if not args.name:
+            os.environ['WANDB_DISABLED'] = 'true'
         wandb.init(
             project="modded-nanogpt",
             name=args.name,
@@ -422,6 +434,7 @@ def main():
                 with ctx: # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
                     logits = model(x_val)
                     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y_val.view(-1), ignore_index=-1)
+                    del logits
                     val_loss += loss.detach()
                     del loss
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
@@ -477,6 +490,7 @@ def main():
             with ctx:
                 logits = model(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=-1)
+                del logits
                 train_loss = loss.detach()
             # advance the dataset for the next batch
             x, y = train_loader.next_batch()
@@ -486,6 +500,7 @@ def main():
                     loss.backward()
             else:
                 loss.backward() # just sync on the last step
+            del loss
         for p in model.parameters():
             p.grad /= train_accumulation_steps
 
