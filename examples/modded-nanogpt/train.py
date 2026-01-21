@@ -192,31 +192,19 @@ class DistributedDataLoader:
             ntok_total += int(shard_ntok)
         self.ntok_total = ntok_total
 
-        # kick things off
-        self.reset()
-
-    def reset(self):
-        self.current_shard = 0
-        self.current_position = self.process_rank * self.B * self.T
-        self.tokens = _load_data_shard(self.files[self.current_shard])
-
-    def advance(self): # advance to next data shard
-        self.current_shard = (self.current_shard + 1) % len(self.files)
-        self.current_position = self.process_rank * self.B * self.T
-        self.tokens = _load_data_shard(self.files[self.current_shard])
-
-    def next_batch(self):
-        B = self.B
-        T = self.T
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
-        buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
-        x = (buf[:-1]).view(B, T) # inputs
-        y = (buf[1:]).view(B, T) # targets
-        # advance current position and load next shard if necessary
-        self.current_position += B * T * self.num_processes
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.advance()
-        return x.cuda(), y.cuda()
+    def token_generator(self):
+        BT = self.B * self.T
+        start = self.process_rank * BT
+        global_bs = self.num_processes * BT
+        while True:
+            for f in self.files:
+                tokens = _load_data_shard(f)
+                for offset in range(start, len(tokens) - global_bs, global_bs):
+                    buf = tokens[offset : offset + BT + 1]
+                    buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
+                    x = (buf[:-1]).view(self.B, self.T) # inputs
+                    y = (buf[1:]).view(self.B, self.T) # targets
+                    yield x.cuda(), y.cuda()
 
 # -----------------------------------------------------------------------------
 # int main
@@ -296,7 +284,7 @@ def main():
     if not args.num_iterations:
         args.num_iterations = train_loader.ntok_total // tokens_per_global_batch
 
-    x, y = train_loader.next_batch()
+    x, y = next(train_loader.token_generator())
 
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
@@ -409,7 +397,7 @@ def main():
     torch.cuda.synchronize()
     t0 = time.time()
     # begin training
-    train_loader.reset()
+    train_gen = train_loader.token_generator()
     for step in range(args.num_iterations + 1):
         last_step = (step == args.num_iterations)
         # This effectively ignores timing first 10 steps, which are slower for weird reasons.
@@ -427,10 +415,10 @@ def main():
             training_time_ms += 1000 * (time.time() - t0)
             # run validation batches
             model.eval()
-            val_loader.reset()
+            val_gen = val_loader.token_generator()
             val_loss = 0.0
             for _ in range(val_steps):
-                x_val, y_val = val_loader.next_batch()
+                x_val, y_val = next(val_gen)
                 with ctx: # of course, we'd like to use no_grad() here too, but that creates a torch.compile error for some reason
                     logits = model(x_val)
                     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y_val.view(-1), ignore_index=-1)
@@ -493,7 +481,7 @@ def main():
                 del logits
                 train_loss = loss.detach()
             # advance the dataset for the next batch
-            x, y = train_loader.next_batch()
+            x, y = next(train_gen)
             # backward pass
             if i < train_accumulation_steps:
                 with model.no_sync(): # there's no need to sync gradients every accumulation step
