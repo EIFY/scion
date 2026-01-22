@@ -366,8 +366,6 @@ def main():
     # begin logging
     if master_process:
         run_id = str(uuid.uuid4())
-        if not args.name:
-            os.environ['WANDB_DISABLED'] = 'true'
         wandb.init(
             project="modded-nanogpt",
             name=args.name,
