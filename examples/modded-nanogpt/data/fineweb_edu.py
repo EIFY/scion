@@ -22,7 +22,7 @@ import multiprocessing as mp
 import numpy as np
 import tiktoken
 # from huggingface_hub import snapshot_download
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from tqdm import tqdm
 import argparse
 import numpy as np
@@ -53,9 +53,13 @@ def write_datafile(filename, toks):
         f.write(toks_np.tobytes())
 # ------------------------------------------
 
+BATCH_SIZE = 8*64*1024 # Intended BS in terms of number of tokens
+
 parser = argparse.ArgumentParser(description="FineWeb-Edu dataset preprocessing")
 parser.add_argument("-v", "--version", type=str, default="10B", help="Which version of fineweb-edu to use 10B|100B")
-parser.add_argument("-s", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens")
+parser.add_argument("-s", "--train_shard_size", type=int, default=200 * BATCH_SIZE + 1, help="Size of each train shard in tokens")
+parser.add_argument("--val_shard_size", type=int, default=20 * BATCH_SIZE + 1, help="Size of each val shard in tokens")
+parser.add_argument("--test", action='store_true', help="Test with 'The Fox and the Grapes")
 
 
 def tokenize_with(doc, enc, eot):
@@ -70,65 +74,71 @@ def tokenize_with(doc, enc, eot):
 
 def main():
     args = parser.parse_args()
+    if args.test:
+        local_dir = "test"
+        DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
+        os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+        def gen():
+            yield {'text': 'A hungry Fox saw some fine bunches of Grapes hanging from a vine that was trained along a high trellis, and did his best to reach them by jumping as high as he could into the air. But it was all in vain, for they were just out of reach: so he gave up trying, and walked away with an air of dignity and unconcern, remarking, "I thought those Grapes were ripe, but I see now they are quite sour."'}
+        fw = Dataset.from_generator(gen)
+    else:
+        # FineWeb-Edu has a few possible subsamples available
+        assert args.version in ["10B", "100B"], "version must be one of 10B, 100B"
+        if args.version == "10B":
+            local_dir = "fineweb-edu10B"
+            remote_name = "sample-10BT"
+        elif args.version == "100B":
+            local_dir = "fineweb-edu100B"
+            remote_name = "sample-100BT"
 
-    # FineWeb has a few possible subsamples available
-    assert args.version in ["10B", "100B"], "version must be one of 10B, 100B"
-    if args.version == "10B":
-        local_dir = "fineweb-edu10B"
-        remote_name = "sample-10BT"
-    elif args.version == "100B":
-        local_dir = "fineweb-edu100B"
-        remote_name = "sample-100BT"
+        # create the cache the local directory if it doesn't exist yet
+        DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
+        os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
-    # create the cache the local directory if it doesn't exist yet
-    DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
-    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
-
-    # download the dataset
-    fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
-
+        # download the dataset
+        fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
     # init the tokenizer
     enc = tiktoken.get_encoding("gpt2")
     eot = enc._special_tokens['<|endoftext|>'] # end of text token
     tokenize = functools.partial(tokenize_with, enc=enc, eot=eot)
 
-    # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
+    # tokenize all documents and write output shards, each of {val|train}_shard_size tokens (last shard has remainder)
     nprocs = max(1, os.cpu_count() - 2) # don't hog the entire system
     with mp.Pool(nprocs) as pool:
         shard_index = 0
+        split = "val"
+        shard_size = args.val_shard_size
         # preallocate buffer to hold current shard
-        all_tokens_np = np.empty((args.shard_size,), dtype=np.uint16)
+        all_tokens_np = np.empty((shard_size,), dtype=np.uint16)
         token_count = 0
-        progress_bar = None
+        progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}")
         for tokens in pool.imap(tokenize, fw, chunksize=16):
 
-            # is there enough space in the current shard for the new tokens?
-            if token_count + len(tokens) < args.shard_size:
-                # simply append tokens to current shard
-                all_tokens_np[token_count:token_count+len(tokens)] = tokens
-                token_count += len(tokens)
-                # update progress bar
-                if progress_bar is None:
-                    progress_bar = tqdm(total=args.shard_size, unit="tokens", desc=f"Shard {shard_index}")
-                progress_bar.update(len(tokens))
-            else:
+            while token_count + len(tokens) >= shard_size:
                 # write the current shard and start a new one
-                split = "val" if shard_index == 0 else "train"
                 filename = os.path.join(DATA_CACHE_DIR, f"fineweb_edu_{split}_{shard_index:06d}.bin")
                 # split the document into whatever fits in this shard; the remainder goes to next one
-                remainder = args.shard_size - token_count
+                remainder = shard_size - token_count
                 progress_bar.update(remainder)
                 all_tokens_np[token_count:token_count+remainder] = tokens[:remainder]
                 write_datafile(filename, all_tokens_np)
+                if not shard_index:
+                    split = "train"
+                    shard_size = args.train_shard_size
+                    all_tokens_np = np.empty((args.train_shard_size,), dtype=np.uint16)
                 shard_index += 1
-                progress_bar = None
-                # populate the next shard with the leftovers of the current doc
-                all_tokens_np[0:len(tokens)-remainder] = tokens[remainder:]
-                token_count = len(tokens)-remainder
+                token_count = 0
+                progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}")
+                tokens = tokens[remainder:]
+
+            # simply append tokens to current shard
+            all_tokens_np[token_count:token_count+len(tokens)] = tokens
+            token_count += len(tokens)
+            # update progress bar
+            progress_bar.update(len(tokens))
 
         # write any remaining tokens as the last shard
         if token_count != 0:
-            split = "val" if shard_index == 0 else "train"
             filename = os.path.join(DATA_CACHE_DIR, f"fineweb_edu_{split}_{shard_index:06d}.bin")
             write_datafile(filename, all_tokens_np[:token_count])
 

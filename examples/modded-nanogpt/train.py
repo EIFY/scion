@@ -185,12 +185,14 @@ class DistributedDataLoader:
         assert len(self.files) > 0, f"did not find any files that match the pattern {filename_pattern}"
 
         # load and validate all data shards, count number of tokens in total
-        ntok_total = 0
+        ntok_total = nstep_total = 0
         for fname in self.files:
             shard_ntok = _peek_data_shard(fname)
             assert shard_ntok >= num_processes * B * T + 1
             ntok_total += int(shard_ntok)
+            nstep_total += (shard_ntok - 1) // (num_processes * B * T)
         self.ntok_total = ntok_total
+        self.nstep_total = nstep_total
 
     def token_generator(self):
         BT = self.B * self.T
@@ -230,7 +232,7 @@ class Hyperparameters:
     grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens : int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons.
+    val_tokens : int = 10485761 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons.
     save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
     n_layer : int = 12
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
@@ -274,17 +276,17 @@ def main():
 
     tokens_per_global_batch = B * T * ddp_world_size
     if not args.val_tokens:
-        val_steps = val_loader.ntok_total // tokens_per_global_batch
-        args.val_tokens = val_steps * tokens_per_global_batch
+        val_steps = val_loader.nstep_total
     else:
         # calculate the number of steps to take in the val loop.
-        assert args.val_tokens % tokens_per_global_batch == 0
-        val_steps = args.val_tokens // tokens_per_global_batch
+        assert (args.val_tokens - 1) % tokens_per_global_batch == 0
+        val_steps = (args.val_tokens - 1) // tokens_per_global_batch
 
     if not args.num_iterations:
-        args.num_iterations = train_loader.ntok_total // tokens_per_global_batch
+        args.num_iterations = train_loader.nstep_total
 
-    x, y = next(train_loader.token_generator())
+    train_gen = train_loader.token_generator()
+    x, y = next(train_gen)
 
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
@@ -395,7 +397,6 @@ def main():
     torch.cuda.synchronize()
     t0 = time.time()
     # begin training
-    train_gen = train_loader.token_generator()
     for step in range(args.num_iterations + 1):
         last_step = (step == args.num_iterations)
         # This effectively ignores timing first 10 steps, which are slower for weird reasons.
