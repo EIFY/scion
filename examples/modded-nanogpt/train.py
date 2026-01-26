@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import math
+import random
 import numpy as np
 import torch
 from torch import nn
@@ -173,6 +174,13 @@ def _load_data_shard(filename):
     assert len(tokens) == ntok, "number of tokens read does not match header?"
     return tokens
 
+def _maybe_shuffle(original, seed):
+    if seed is None:
+        return original, seed
+    shuffled = list(original)
+    random.Random(seed).shuffle(shuffled)
+    return shuffled, seed + 1
+
 class DistributedDataLoader:
     def __init__(self, filename_pattern, B, T, process_rank, num_processes):
         self.process_rank = process_rank
@@ -194,14 +202,16 @@ class DistributedDataLoader:
         self.ntok_total = ntok_total
         self.nstep_total = nstep_total
 
-    def token_generator(self):
+    def token_generator(self, seed=None):
         BT = self.B * self.T
         start = self.process_rank * BT
         global_bs = self.num_processes * BT
         while True:
-            for f in self.files:
+            files, seed = _maybe_shuffle(self.files, seed)
+            for f in files:
                 tokens = _load_data_shard(f)
-                for offset in range(start, len(tokens) - global_bs, global_bs):
+                offsets, seed = _maybe_shuffle(range(start, len(tokens) - global_bs, global_bs), seed)
+                for offset in offsets:
                     buf = tokens[offset : offset + BT + 1]
                     buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
                     x = (buf[:-1]).view(self.B, self.T) # inputs
@@ -222,6 +232,7 @@ class Hyperparameters:
     device_batch_size : int = 32 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
     num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
+    seed : Optional[int] = None # change to an int to shuffle files and offsets
     learning_rate : float = 2 ** -12 * 50
     corrected = True
     sign_lr : float = 2 ** -12 * 3000
@@ -285,7 +296,7 @@ def main():
     if not args.num_iterations:
         args.num_iterations = train_loader.nstep_total
 
-    train_gen = train_loader.token_generator()
+    train_gen = train_loader.token_generator(args.seed)
     x, y = next(train_gen)
 
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
