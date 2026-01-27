@@ -234,12 +234,14 @@ class Hyperparameters:
     num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
     seed : Optional[int] = None # change to an int to shuffle files and offsets
     learning_rate : float = 2 ** -12 * 50
-    corrected = True
+    corrected : bool = False
+    c_sq : float = 5.79833984375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 50 ** 2
+    weight_decay : float = 1 / 50
     sign_lr : float = 2 ** -12 * 3000
-    head_corrected = False
-    exact = False
+    head_corrected : bool = False
+    sign_weight_decay : float = 1 / 3000
+    sign_c_sq : float = 20874.0234375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 3000 ** 2
     warmup_iters : int = 0
-    weight_decay : float = 2 ** -12
     grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
@@ -320,41 +322,19 @@ def main():
             'norm_kwargs': {'steps': 5},
             'lr': args.learning_rate,
             'corrected': args.corrected,
+            'weight_decay': args.weight_decay,
+            'c_sq': args.c_sq,
         }, {
             'params': raw_model.lm_head.parameters(),
             'norm': 'Sign',
             'norm_kwargs': {},
             'lr': args.sign_lr,
             'corrected': args.head_corrected,
+            'weight_decay': args.sign_weight_decay,
+            'c_sq': args.sign_c_sq
         }
     ]
 
-    def wd_scheduler(max_wd, max_lr, corrected, exact):
-
-        def uncorrected_wd(lr):
-            return max_wd
-
-        def corrected_wd(lr):
-            return max_wd * lr / max_lr
-
-        c = max_lr / max_wd / (2 - max_lr * max_wd) if max_wd > 0 else 0.
-
-        def exact_wd(lr):
-            if lr <= 0 or c <= 0:
-                return 0.
-            return (1 - math.sqrt(1 - lr ** 2 / c)) / lr
-
-        if corrected:
-            return exact_wd if exact else corrected_wd
-        else:
-            return uncorrected_wd
-
-    wd_schedulers = [
-        wd_scheduler(wd / lr, lr, c, args.exact) for wd, lr, c in [
-            (args.weight_decay, args.learning_rate, args.corrected),
-            (args.weight_decay, args.sign_lr, args.head_corrected)
-        ]
-    ]
     optimizer1 = Scion(optim_groups, dict(momentum=args.momentum), rank=ddp_rank, world_size=ddp_world_size)
     optimizer1.init()
     optimizers = [optimizer1]
@@ -372,9 +352,6 @@ def main():
             decay_ratio = 0.5 * (1 + math.cos(it * math.pi / cosine_steps))
             return decay_ratio
     schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, get_lr) for opt in optimizers]
-
-    for group, wd_sched in zip(optimizer1.param_groups, wd_schedulers):
-        group['weight_decay'] = wd_sched(group['lr'])
 
     # begin logging
     if master_process:
@@ -508,8 +485,6 @@ def main():
         for opt, sched in zip(optimizers, schedulers):
             opt.step()
             sched.step()
-        for group, wd_sched in zip(optimizer1.param_groups, wd_schedulers):
-            group['weight_decay'] = wd_sched(group['lr'])
         # null the gradients
         model.zero_grad(set_to_none=True)
         # --------------- TRAINING SECTION END -------------------
