@@ -251,6 +251,7 @@ class Hyperparameters:
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
     momentum: float = 0.1
+    max_momentum: float = 0.1
 
 from datargs import parse
 
@@ -335,9 +336,15 @@ def main():
         }
     ]
 
-    optimizer1 = Scion(optim_groups, dict(momentum=args.momentum), rank=ddp_rank, world_size=ddp_world_size)
-    optimizer1.init()
-    optimizers = [optimizer1]
+    optimizer = Scion(optim_groups, dict(momentum=args.momentum), rank=ddp_rank, world_size=ddp_world_size)
+    optimizer.init()
+
+    for group in optimizer.param_groups:
+        if group['corrected']:
+            lr, momentum = group['lr'], group['momentum']
+            group['max_lr_eff'] = math.sqrt((2 - momentum) / momentum) * lr
+        else:
+            group['max_lr'] = group['lr']
 
     # learning rate decay scheduler (linear warmup and cosine annealing)
     def get_lr(it):
@@ -351,7 +358,19 @@ def main():
             cosine_steps = args.num_iterations - args.warmup_iters
             decay_ratio = 0.5 * (1 + math.cos(it * math.pi / cosine_steps))
             return decay_ratio
-    schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, get_lr) for opt in optimizers]
+
+    def scheduler(group, step):
+        if not group['corrected']:
+            group['lr'] = get_lr(step) * group['max_lr']
+        elif (target_lr := get_lr(step) * group['max_lr_eff']) >= math.sqrt((2 - args.max_momentum) / args.max_momentum) * group['lr']:
+            ratio = target_lr / group['lr']
+            # sqrt((2 - mo) / mo) = ratio ->
+            # ratio ** 2 * mo = 2 - mo ->
+            # (1 + ratio ** 2) * mo = 2
+            group['momentum'] = 2 / (1 + ratio ** 2)
+        else:
+            group['momentum'] = args.max_momentum
+            group['lr'] = target_lr * math.sqrt(args.max_momentum / (2 - args.max_momentum))
 
     # begin logging
     if master_process:
@@ -418,7 +437,13 @@ def main():
             if master_process:
 
                 log_data = {}
-                log_data['spectral_norm'], log_data['sign_norm'] = optimizer1.report_norms()
+                log_data['spectral_norm'], log_data['sign_norm'] = optimizer.report_norms()
+
+                hidden_group = optimizer.param_groups[0]
+                lr, momentum = hidden_group['lr'], hidden_group['momentum']
+                effective_lr = math.sqrt((2 - momentum) / momentum) * lr
+                log_data["effective_lr"] = effective_lr
+
                 log_data["val/loss"] = val_loss
                 l2_params = sum(p.data.square().sum().item() for p in model.parameters())
                 log_data["l2_params"] = math.sqrt(l2_params)
@@ -429,7 +454,7 @@ def main():
                 with open(logfile, "a") as f:
                     f.write(log_line + '\n')
             else:
-                optimizer1.sync_state_for('norm')
+                optimizer.sync_state_for('norm')
 
             # start the clock again
             torch.cuda.synchronize()
@@ -441,14 +466,14 @@ def main():
                 torch.cuda.synchronize()
                 training_time_ms += 1000 * (time.time() - t0)
                 # save the state of the training process
-                log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+                log = dict(step=step, code=code, model=raw_model.state_dict(), optimizer=optimizer.state_dict())
                 torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
                 # start the clock again
                 torch.cuda.synchronize()
                 t0 = time.time()
             else:
-                optimizer1.sync_state()
-            optimizer1.remove_unused_keys()
+                optimizer.sync_state()
+            optimizer.remove_unused_keys()
             torch.cuda.empty_cache()
 
         # bit confusing: we want to make sure to eval on 0th iteration
@@ -482,9 +507,10 @@ def main():
         l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
 
         # step the optimizers and schedulers
-        for opt, sched in zip(optimizers, schedulers):
-            opt.step()
-            sched.step()
+        optimizer.step()
+        for group in optimizer.param_groups:
+            scheduler(group, step + 1)
+
         # null the gradients
         model.zero_grad(set_to_none=True)
         # --------------- TRAINING SECTION END -------------------
