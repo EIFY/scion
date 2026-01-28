@@ -241,7 +241,6 @@ class Hyperparameters:
     head_corrected : bool = False
     sign_weight_decay : float = 1 / 3000
     sign_c_sq : float = 20874.0234375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 3000 ** 2
-    warmup_iters : int = 0
     grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
@@ -250,14 +249,17 @@ class Hyperparameters:
     n_layer : int = 12
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
-    momentum: float = 0.1
-    max_momentum: float = 0.1
+    momentum : float = 0.1
+    max_momentum: Optional[float] = None
+    end_c_sq_mul : float = 1.0
 
 from datargs import parse
 
 def main():
 
     args = parse(Hyperparameters)
+    if args.max_momentum is None:
+        args.max_momentum = args.momentum # defaults to constant momentum
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     assert torch.cuda.is_available()
@@ -343,34 +345,32 @@ def main():
         if group['corrected']:
             lr, momentum = group['lr'], group['momentum']
             group['max_lr_eff'] = math.sqrt((2 - momentum) / momentum) * lr
+            group['start_c_sq'] = group['c_sq']
+            group['end_c_sq'] = group['c_sq'] * args.end_c_sq_mul
         else:
             group['max_lr'] = group['lr']
 
-    # learning rate decay scheduler (linear warmup and cosine annealing)
+    # learning rate decay scheduler (cosine annealing)
     def get_lr(it):
         assert it <= args.num_iterations
-        # 1) linear warmup for warmup_iters steps
-        if it < args.warmup_iters:
-            return (it+1) / args.warmup_iters
-        # 2) cosine annealing schedule
-        else:
-            it -= args.warmup_iters
-            cosine_steps = args.num_iterations - args.warmup_iters
-            decay_ratio = 0.5 * (1 + math.cos(it * math.pi / cosine_steps))
-            return decay_ratio
+        # cosine annealing schedule
+        return 0.5 * (1 + math.cos(it * math.pi / args.num_iterations))
 
     def scheduler(group, step):
+        ratio = get_lr(step)
         if not group['corrected']:
-            group['lr'] = get_lr(step) * group['max_lr']
-        elif (target_lr := get_lr(step) * group['max_lr_eff']) >= math.sqrt((2 - args.max_momentum) / args.max_momentum) * group['lr']:
-            ratio = target_lr / group['lr']
-            # sqrt((2 - mo) / mo) = ratio ->
-            # ratio ** 2 * mo = 2 - mo ->
-            # (1 + ratio ** 2) * mo = 2
-            group['momentum'] = 2 / (1 + ratio ** 2)
+            group['lr'] = ratio * group['max_lr']
         else:
-            group['momentum'] = args.max_momentum
-            group['lr'] = target_lr * math.sqrt(args.max_momentum / (2 - args.max_momentum))
+            if (target_lr := ratio * group['max_lr_eff']) >= math.sqrt((2 - args.max_momentum) / args.max_momentum) * group['lr']:
+                ratio = target_lr / group['lr']
+                # sqrt((2 - mo) / mo) = ratio ->
+                # ratio ** 2 * mo = 2 - mo ->
+                # (1 + ratio ** 2) * mo = 2
+                group['momentum'] = 2 / (1 + ratio ** 2)
+            else:
+                group['momentum'] = args.max_momentum
+                group['lr'] = target_lr * math.sqrt(args.max_momentum / (2 - args.max_momentum))
+            group['c_sq'] = ratio * group['start_c_sq'] + (1 - ratio) * group['end_c_sq']
 
     # begin logging
     if master_process:
