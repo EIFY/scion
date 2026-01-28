@@ -252,7 +252,7 @@ class Hyperparameters:
     momentum : float = 0.1
     max_momentum: Optional[float] = None
     end_c_sq_mul : float = 1.0
-
+    cautious : bool = False
 from datargs import parse
 
 def main():
@@ -338,7 +338,7 @@ def main():
         }
     ]
 
-    optimizer = Scion(optim_groups, dict(momentum=args.momentum), rank=ddp_rank, world_size=ddp_world_size)
+    optimizer = Scion(optim_groups, dict(momentum=args.momentum, cautious=args.cautious), rank=ddp_rank, world_size=ddp_world_size)
     optimizer.init()
 
     for group in optimizer.param_groups:
