@@ -19,6 +19,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
+from cut_cross_entropy import linear_cross_entropy
 
 import wandb
 
@@ -140,10 +141,7 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = F.rms_norm(x, (x.size(-1),))
-        logits = self.lm_head(x)
-        logits = logits.float() # use tf32/fp32 for logits
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
-        return loss
+        return linear_cross_entropy(x.view(-1, x.size(-1)), self.lm_head.weight, target.view(-1), ignore_index=-1)
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
