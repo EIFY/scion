@@ -59,7 +59,7 @@ parser = argparse.ArgumentParser(description="FineWeb-Edu dataset preprocessing"
 parser.add_argument("-v", "--version", type=str, default="10B", help="Which version of fineweb-edu to use 10B|100B")
 parser.add_argument("-s", "--train_shard_size", type=int, default=200 * BATCH_SIZE + 1, help="Size of each train shard in tokens")
 parser.add_argument("--val_shard_size", type=int, default=20 * BATCH_SIZE + 1, help="Size of each val shard in tokens")
-parser.add_argument("--test", action='store_true', help="Test with 'The Fox and the Grapes")
+parser.add_argument("--test", action='store_true', help="Test with 'The Fox and the Grapes'")
 
 
 def tokenize_with(doc, enc, eot):
