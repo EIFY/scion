@@ -270,10 +270,9 @@ class Scion(torch.optim.Optimizer):
                 continue
             state = self.state[p]
 
-            if momentum != 1:
-                buf = state['momentum_buffer']
-                buf.mul_(1-momentum).add_(g, alpha=momentum)
-                g = buf
+            buf = state['momentum_buffer']
+            buf.mul_(1-momentum).add_(g, alpha=momentum)
+            g = buf
 
             update = norm_backend.lmo(g)
 
@@ -307,8 +306,7 @@ class Scion(torch.optim.Optimizer):
             init_func = norm_backend.init
             state = self.state[p]
             state['norm'], state['singular'] = init_func(p, init_dtype=init_dtype)
-            if group['momentum'] != 1:
-                state['momentum_buffer'] = torch.zeros_like(p)
+            state['momentum_buffer'] = torch.zeros_like(p)
 
 
 # Polar Express (https://arxiv.org/abs/2505.16932) w/ eps to prevent divide-by-zero
