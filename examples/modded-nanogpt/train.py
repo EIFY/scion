@@ -263,6 +263,7 @@ class Hyperparameters:
     end_c_sq_mul : float = 1.0
     cautious : bool = False
     cut : bool = False # Use cut_cross_entropy
+    nesterov : bool = False
 from datargs import parse
 
 def main():
@@ -346,13 +347,20 @@ def main():
         }
     ]
 
-    optimizer = Scion(optim_groups, dict(momentum=args.init_momentum, cautious=args.cautious), rank=ddp_rank, world_size=ddp_world_size)
+    optimizer = Scion(optim_groups, dict(momentum=args.init_momentum, cautious=args.cautious, nesterov=args.nesterov), rank=ddp_rank, world_size=ddp_world_size)
     optimizer.init()
+
+    def correction(mo, nesterov):
+        """lr = lr_eff * corr"""
+        corr = math.sqrt(mo / (2 - mo))
+        if nesterov:
+            corr *= math.sqrt(1 + 4*mo - 6*mo**2 + 2*mo**3)
+        return corr
 
     for group in optimizer.param_groups:
         group['lr'] = group['max_lr_eff']
         if group['corrected']:
-            group['lr'] *= math.sqrt(args.momentum / (2 - args.momentum))
+            group['lr'] *= correction(args.momentum, group['nesterov'])
             group['start_c_sq'] = group['c_sq']
             group['end_c_sq'] = group['c_sq'] * args.end_c_sq_mul
 
@@ -370,7 +378,7 @@ def main():
         group['lr'] = ratio * group['max_lr_eff']
         mo = group['momentum'] = momentum(step)
         if group['corrected']:
-            group['lr'] *= math.sqrt(mo / (2 - mo))
+            group['lr'] *= correction(mo, group['nesterov'])
             group['c_sq'] = ratio * group['start_c_sq'] + (1 - ratio) * group['end_c_sq']
 
     # begin logging
@@ -440,7 +448,7 @@ def main():
 
                 hidden_group = optimizer.param_groups[0]
                 lr, mo = hidden_group['lr'], hidden_group['momentum']
-                effective_lr = math.sqrt((2 - mo) / mo) * lr
+                effective_lr = lr / correction(mo, hidden_group['nesterov'])
                 log_data["effective_lr"] = effective_lr
 
                 log_data["val/loss"] = val_loss
