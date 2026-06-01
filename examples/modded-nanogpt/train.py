@@ -120,6 +120,7 @@ class GPTConfig:
     n_layer : int = 12
     n_head : int = 6 # head dim 128 suggested by @Grad62304977
     n_embd : int = 768
+    cut : bool = False # Use cut_cross_entropy
 
 class GPT(nn.Module):
 
@@ -141,7 +142,15 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = F.rms_norm(x, (x.size(-1),))
-        return linear_cross_entropy(x.view(-1, x.size(-1)), self.lm_head.weight, target.view(-1), ignore_index=-1)
+        if self.config.cut:
+            loss = linear_cross_entropy(x.view(-1, x.size(-1)), self.lm_head.weight, target.view(-1), ignore_index=-1)
+        elif hasattr(F, 'linear_cross_entropy'):
+            loss = F.linear_cross_entropy(x.view(-1, x.size(-1)), self.lm_head.weight, target.view(-1), ignore_index=-1)
+        else:
+            logits = self.lm_head(x)
+            logits = logits.float() # use tf32/fp32 for logits
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
+        return loss
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -252,6 +261,7 @@ class Hyperparameters:
     max_momentum: Optional[float] = None
     end_c_sq_mul : float = 1.0
     cautious : bool = False
+    cut : bool = False # Use cut_cross_entropy
 from datargs import parse
 
 def main():
@@ -306,7 +316,7 @@ def main():
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
     num_vocab = 50304
-    model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd))
+    model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd, cut=args.cut))
     model = model.cuda()
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True # suggested by @Chillee
