@@ -23,7 +23,7 @@ from cut_cross_entropy import linear_cross_entropy
 
 import wandb
 
-from scion import Scion
+from scion import Scion, lr_factor
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for modded-nanogpt
@@ -241,14 +241,12 @@ class Hyperparameters:
     sequence_length : int = 1024 # sequence length, in tokens
     num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
     seed : Optional[int] = None # change to an int to shuffle files and offsets
-    effective_learning_rate : float = 2 ** -12 * 50 * ((2 - 0.1) / 0.1) ** 0.5
+    lr : float = 2 ** -12 * 50
     corrected : bool = False
     c_sq : float = 5.79833984375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 50 ** 2
-    weight_decay : float = 1 / 50
-    effective_sign_lr : float = 2 ** -12 * 3000
-    head_corrected : bool = False
-    sign_weight_decay : float = 1 / 3000
-    sign_c_sq : float = 20874.0234375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 3000 ** 2
+    wd : float = 1 / 50
+    sign_lr : float = 2 ** -12 * 3000
+    sign_wd : float = 1 / 3000
     grad_clip_norm : float = 1000000. # effectively no clipping
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
@@ -257,13 +255,14 @@ class Hyperparameters:
     n_layer : int = 12
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
-    init_momentum : float = 1.0
     momentum : float = 0.1
     timescale_inv : float = 0.0
     end_c_sq_mul : float = 1.0
     cautious : bool = False
     cut : bool = False # Use cut_cross_entropy
     nesterov : bool = False
+    sign_mo : Optional[float] = None # Momentum for sign paramters, defaults to momentum
+    sign_ne : Optional[bool] = None # Nesterov or not for sign parameters, defaults to nesterov
 from datargs import parse
 
 def main():
@@ -310,6 +309,12 @@ def main():
     if not args.num_iterations:
         args.num_iterations = train_loader.nstep_total
 
+    if args.sign_mo is None:
+        args.sign_mo = args.momentum
+
+    if args.sign_ne is None:
+        args.sign_ne = args.nesterov
+
     train_gen = train_loader.token_generator(args.seed)
     x, y = next(train_gen)
 
@@ -332,40 +337,35 @@ def main():
             'params': raw_model.transformer.h.parameters(),
             'norm': 'Spectral',
             'norm_kwargs': {'steps': 5},
-            'max_lr_eff': args.effective_learning_rate,
             'corrected': args.corrected,
-            'weight_decay': args.weight_decay,
+            'weight_decay': args.wd,
             'c_sq': args.c_sq,
         }, {
             'params': raw_model.lm_head.parameters(),
             'norm': 'Sign',
             'norm_kwargs': {},
-            'max_lr_eff': args.effective_sign_lr,
-            'corrected': args.head_corrected,
-            'weight_decay': args.sign_weight_decay,
-            'c_sq': args.sign_c_sq
+            'lr': args.sign_lr,
+            'corrected': False,
+            'weight_decay': args.sign_wd,
+            'momentum': args.sign_mo,
+            'nesterov': args.sign_ne,
         }
     ]
 
-    optimizer = Scion(optim_groups, dict(momentum=args.init_momentum, cautious=args.cautious, nesterov=args.nesterov), rank=ddp_rank, world_size=ddp_world_size)
+    defaults = dict(lr=args.lr, momentum=args.momentum, nesterov=args.nesterov, cautious=args.cautious)
+    optimizer = Scion(optim_groups, defaults, rank=ddp_rank, world_size=ddp_world_size)
     optimizer.init()
 
-    def correction(mo, nesterov):
-        """lr = lr_eff * corr"""
-        corr = math.sqrt(mo / (2 - mo))
-        if nesterov:
-            corr *= math.sqrt(1 + 4*mo - 6*mo**2 + 2*mo**3)
-        return corr
-
     for group in optimizer.param_groups:
-        group['lr'] = group['max_lr_eff']
         if group['corrected']:
-            group['lr'] *= correction(args.momentum, group['nesterov'])
+            group['max_lr_eff'] = group['lr'] * lr_factor(group['momentum'], nesterov=group['nesterov'])
             group['start_c_sq'] = group['c_sq']
             group['end_c_sq'] = group['c_sq'] * args.end_c_sq_mul
+        else:
+            group['max_lr'] = group['lr']
 
     # learning rate decay scheduler (cosine annealing)
-    def get_lr(it):
+    def lr_ratio(it):
         assert it <= args.num_iterations
         # cosine annealing schedule
         return 0.5 * (1 + math.cos(it * math.pi / args.num_iterations))
@@ -374,12 +374,14 @@ def main():
         return args.momentum * (1 / (1 + step * args.timescale_inv))
 
     def scheduler(group, step):
-        ratio = get_lr(step)
-        group['lr'] = ratio * group['max_lr_eff']
-        mo = group['momentum'] = momentum(step)
+        ratio = lr_ratio(step)
         if group['corrected']:
-            group['lr'] *= correction(mo, group['nesterov'])
+            # Momentum should only be scheduled for corrected parameters
+            group['momentum'] = momentum(step)
+            group['lr'] = ratio * group['max_lr_eff'] / lr_factor(group['momentum'], nesterov=group['nesterov'])
             group['c_sq'] = ratio * group['start_c_sq'] + (1 - ratio) * group['end_c_sq']
+        else:
+            group['lr'] = ratio * group['max_lr']
 
     # begin logging
     if master_process:
@@ -408,6 +410,7 @@ def main():
             f.write(f'{result.stdout}\n')
             f.write('='*100 + '\n')
 
+    final_val_loss = math.inf
     training_time_ms = 0
     # start the clock
     torch.cuda.synchronize()
@@ -448,10 +451,10 @@ def main():
 
                 hidden_group = optimizer.param_groups[0]
                 lr, mo = hidden_group['lr'], hidden_group['momentum']
-                effective_lr = lr / correction(mo, hidden_group['nesterov'])
+                effective_lr = lr * lr_factor(mo, hidden_group['nesterov'])
                 log_data["effective_lr"] = effective_lr
 
-                log_data["val/loss"] = val_loss
+                final_val_loss = log_data["val/loss"] = val_loss
                 l2_params = sum(p.data.square().sum().item() for p in model.parameters())
                 log_data["l2_params"] = math.sqrt(l2_params)
                 wandb.log(log_data, step=step)
@@ -473,7 +476,7 @@ def main():
                 torch.cuda.synchronize()
                 training_time_ms += 1000 * (time.time() - t0)
                 # save the state of the training process
-                log = dict(step=step, code=code, model=raw_model.state_dict(), optimizer=optimizer.state_dict())
+                log = dict(step=step, code=code, model=raw_model.state_dict(), optimizer=optimizer.state_dict(), val_loss=final_val_loss)
                 torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
                 # start the clock again
                 torch.cuda.synchronize()
@@ -535,7 +538,6 @@ def main():
 
     # -------------------------------------------------------------------------
     # clean up nice
-    dist.barrier()
     dist.destroy_process_group()
 
 
