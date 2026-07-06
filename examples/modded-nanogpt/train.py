@@ -385,17 +385,16 @@ def main():
 
     # begin logging
     if master_process:
-        run_id = str(uuid.uuid4())
         wandb.init(
             project="modded-nanogpt",
             name=args.name,
-            id=run_id,
+            id=args.name,
             resume='auto',
             config=vars(args),
         )
-        logdir = 'logs/%s/' % run_id
+        logdir = 'logs/%s/' % args.name
         os.makedirs(logdir, exist_ok=True)
-        logfile = 'logs/%s.txt' % run_id
+        logfile = 'logs/%s.txt' % args.name
         # create the log file
         with open(logfile, "w") as f:
             # begin the log by printing this file (the Python code)
@@ -477,7 +476,7 @@ def main():
                 training_time_ms += 1000 * (time.time() - t0)
                 # save the state of the training process
                 log = dict(step=step, code=code, model=raw_model.state_dict(), optimizer=optimizer.state_dict(), val_loss=final_val_loss)
-                torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
+                torch.save(log, 'logs/%s/state_step%06d.pt' % (args.name, step))
                 # start the clock again
                 torch.cuda.synchronize()
                 t0 = time.time()

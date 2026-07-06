@@ -111,7 +111,7 @@ def main():
 
             while token_count + len(tokens) >= shard_size:
                 # write the current shard and start a new one
-                filename = os.path.join(DATA_CACHE_DIR, f"fineweb_edu_{split}_{shard_index:06d}.bin")
+                filename = os.path.join(DATA_CACHE_DIR, f"{args.version}_{split}_{shard_index:06d}.bin")
                 # split the document into whatever fits in this shard; the remainder goes to next one
                 remainder = shard_size - token_count
                 progress_bar.update(remainder)
@@ -134,7 +134,7 @@ def main():
 
         # write any remaining tokens as the last shard
         if token_count != 0:
-            filename = os.path.join(DATA_CACHE_DIR, f"fineweb_edu_{split}_{shard_index:06d}.bin")
+            filename = os.path.join(DATA_CACHE_DIR, f"{args.version}_{split}_{shard_index:06d}.bin")
             write_datafile(filename, all_tokens_np[:token_count])
 
 
