@@ -7,15 +7,17 @@ GPT_DIR = os.path.join(REPO, "examples/modded-nanogpt/")
 
 # For testing:
 
+OPT = 'scion'
 N_STEP = 21
 PYTHON = "torchrun"
 folder = "test"
 fixed = dict(
-    input_bin=f'"{os.path.join(GPT_DIR, f"data/{folder}/fineweb_edu_train_*.bin")}"',  # TODO: Move data out of the repo folder
-    input_val_bin=f'"{os.path.join(GPT_DIR, f"data/{folder}/fineweb_edu_val_*.bin")}"', batch_size=1, device_batch_size=1, val_tokens=0, sequence_length=4)
+    input_bin=f'"{folder}/fineweb_edu_train_*.bin"',
+    input_val_bin=f'"{folder}/fineweb_edu_val_*.bin"', batch_size=1, device_batch_size=1, val_tokens=0, sequence_length=4)
 
 # For production:
 
+# OPT = 'scion-t213'
 # N_STEP = 190734 # Roughly speaking, to be filled in
 # BS = 512
 # N_THREADS = 208
@@ -70,7 +72,7 @@ def flags(d):
     return ' '.join(l)
 
 
-def test_params(curr, fixed=fixed, opt='scion', prefix=prefix, path='logs/'):
+def test_params(curr, fixed=fixed, opt=OPT, prefix=prefix, path='logs/'):
     name = run_name(opt, curr)
     path_name = os.path.join(path, name)
     command = prefix + flags(curr | fixed | dict(name=name))
@@ -517,7 +519,6 @@ for default['corrected'] in ('', None):
 
             print(preface, file=f)
             print("# Double-check after the momentum sweep:", file=f)
-            print(losses)
 
             key = min(losses, key=lambda k: losses[k])
             min_val_loss = losses[key]
