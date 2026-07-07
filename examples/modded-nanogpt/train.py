@@ -241,7 +241,9 @@ class Hyperparameters:
     sequence_length : int = 1024 # sequence length, in tokens
     num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
     seed : Optional[int] = None # change to an int to shuffle files and offsets
-    lr : float = 2 ** -12 * 50
+    lr : float = 2 ** -12 * 50 # Max LR
+    cos_power : float = 1.0 # power of the cosine LR decay, defaults to 1.0
+    power : Optional[float] = None # power of the polynomial LR decay, defaults to None (cosine LR decay)
     corrected : bool = False
     c_sq : float = 5.79833984375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 50 ** 2
     wd : float = 1 / 50
@@ -364,11 +366,15 @@ def main():
         else:
             group['max_lr'] = group['lr']
 
-    # learning rate decay scheduler (cosine annealing)
-    def lr_ratio(it):
-        assert it <= args.num_iterations
-        # cosine annealing schedule
-        return 0.5 * (1 + math.cos(it * math.pi / args.num_iterations))
+    def cosine_lr(step):
+        progress = step / args.num_iterations
+        return ((1 + math.cos(progress * math.pi)) / 2) ** args.cos_power
+
+    def polynomial_lr(step):
+        progress = step / args.num_iterations
+        return (1 - progress) ** args.power
+
+    lr_ratio = cosine_lr if args.power is None else polynomial_lr
 
     def momentum(step):
         return args.momentum * (1 / (1 + step * args.timescale_inv))
