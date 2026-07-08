@@ -8,6 +8,7 @@ GPT_DIR = os.path.join(REPO, "examples/modded-nanogpt/")
 # For testing:
 
 OPT = 'scion'
+BUDGET = 10
 N_STEP = 21
 PYTHON = "torchrun"
 folder = "test"
@@ -17,8 +18,9 @@ fixed = dict(
 
 # For production:
 
-# OPT = 'scion-t213'
+# OPT = ''
 # N_STEP = 190734 # Roughly speaking, to be filled in
+# BUDGET = N_STEP * 3 // 10
 # BS = 512
 # N_THREADS = 208
 # PYTHON = f"NUMEXPR_MAX_THREADS={N_THREADS} torchrun --standalone --nproc_per_node=8"
@@ -27,9 +29,9 @@ fixed = dict(
 #     input_bin=os.path.join(GPT_DIR, f"data/{folder}/fineweb_edu_train_*.bin"),
 #     input_val_bin=os.path.join(GPT_DIR, f"data/{folder}/fineweb_edu_val_*.bin"), batch_size=BS, device_batch_size=BS // 8, val_tokens=0)
 
-LAST_CKPT = 'state_step%06d.pt' % N_STEP
 
-def read_final_loss(p):
+def read_final_loss(p, steps):
+    LAST_CKPT = 'state_step%06d.pt' % steps
     ckpt_path = os.path.join(p, LAST_CKPT)
     val_loss = None
     if os.path.exists(ckpt_path):
@@ -76,7 +78,7 @@ def test_params(curr, fixed=fixed, opt=OPT, prefix=prefix, path='logs/'):
     name = run_name(opt, curr)
     path_name = os.path.join(path, name)
     command = prefix + flags(curr | fixed | dict(name=name))
-    val_loss = read_final_loss(path_name)
+    val_loss = read_final_loss(path_name, steps=curr.get('steps') or N_STEP)
     if val_loss is not None:
         command = '# ' + command  # Done
     return command, val_loss
@@ -282,20 +284,22 @@ class EndMoRatioAutoTuner(AutoTuner):
 
     def next_value(self):
         inv = self.values[-1].get(self.key) or 0.0
-        curr_ratio = 1 / (1 + N_STEP * inv)
+        steps = self.curr.get('steps') or N_STEP
+        curr_ratio = 1 / (1 + steps * inv)
         prev_ratio = curr_ratio / self.factor
-        new_inv = (1/prev_ratio - 1.) / N_STEP
+        new_inv = (1/prev_ratio - 1.) / steps
         if almost_eq(new_inv, 0.0):
             new_inv = None
         return {self.key: new_inv}, True
 
     def prev_value(self):
         inv = self.values[0].get(self.key) or 0.0
-        curr_ratio = 1 / (1 + N_STEP * inv)
+        steps = self.curr.get('steps') or N_STEP
+        curr_ratio = 1 / (1 + steps * inv)
         if almost_eq(curr_ratio, self.max_ratio):
             return None, False
         next_ratio = min(curr_ratio * self.factor, self.max_ratio)
-        new_inv = (1/next_ratio - 1.) / N_STEP
+        new_inv = (1/next_ratio - 1.) / steps
         if almost_eq(new_inv, 0.0):
             new_inv = None
         return {self.key: new_inv}, True
@@ -303,11 +307,12 @@ class EndMoRatioAutoTuner(AutoTuner):
 
 def copy_end_mo(curr, new_mo, key='timescale_inv'):
     inv = curr.get(key) or 0.0
-    end_mo = float(curr['momentum']) / (1. + N_STEP * inv)
-    # new_mo / (1 + N_STEP * inv) = end_mo
-    # new_mo / end_mo = 1 + N_STEP * inv
-    # inv = (new_mo / end_mo - 1) / N_STEP
-    new_inv = (new_mo / end_mo - 1.) / N_STEP
+    steps = self.curr.get('steps') or N_STEP
+    end_mo = float(curr['momentum']) / (1. + steps * inv)
+    # new_mo / (1 + steps * inv) = end_mo
+    # new_mo / end_mo = 1 + steps * inv
+    # inv = (new_mo / end_mo - 1) / steps
+    new_inv = (new_mo / end_mo - 1.) / steps
     return None if almost_eq(new_inv, 0.0) else new_inv
 
 
@@ -377,7 +382,7 @@ class Hyperparameters:
 
 # None is tombstone value, '' (empty string) is for store_true flags
 default = dict(
-    steps=None,
+    steps=BUDGET,
     corrected='',
     momentum=0.1,
     lr=2 ** -12 * 50,
