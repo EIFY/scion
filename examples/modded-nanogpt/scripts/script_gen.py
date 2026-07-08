@@ -377,6 +377,7 @@ class Hyperparameters:
 
 # None is tombstone value, '' (empty string) is for store_true flags
 default = dict(
+    steps=None,
     corrected='',
     momentum=0.1,
     lr=2 ** -12 * 50,

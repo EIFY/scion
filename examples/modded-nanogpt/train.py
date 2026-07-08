@@ -239,7 +239,7 @@ class Hyperparameters:
     batch_size : int = 8*64 # batch size, in sequences, across all devices
     device_batch_size : int = 64 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
-    num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
+    steps : int = 0 # number of iterations to run. Defaults to 1 epoch
     seed : Optional[int] = None # change to an int to shuffle files and offsets
     lr : float = 2 ** -12 * 50 # Max LR
     cos_power : float = 1.0 # power of the cosine LR decay, defaults to 1.0
@@ -308,8 +308,8 @@ def main():
         assert (args.val_tokens - 1) % tokens_per_global_batch == 0
         val_steps = (args.val_tokens - 1) // tokens_per_global_batch
 
-    if not args.num_iterations:
-        args.num_iterations = train_loader.nstep_total
+    if not args.steps:
+        args.steps = train_loader.nstep_total
 
     if args.sign_mo is None:
         args.sign_mo = args.momentum
@@ -367,11 +367,11 @@ def main():
             group['max_lr'] = group['lr']
 
     def cosine_lr(step):
-        progress = step / args.num_iterations
+        progress = step / args.steps
         return ((1 + math.cos(progress * math.pi)) / 2) ** args.cos_power
 
     def polynomial_lr(step):
-        progress = step / args.num_iterations
+        progress = step / args.steps
         return (1 - progress) ** args.power
 
     lr_ratio = cosine_lr if args.power is None else polynomial_lr
@@ -421,8 +421,8 @@ def main():
     torch.cuda.synchronize()
     t0 = time.time()
     # begin training
-    for step in range(args.num_iterations + 1):
-        last_step = (step == args.num_iterations)
+    for step in range(args.steps + 1):
+        last_step = (step == args.steps)
         # This effectively ignores timing first 10 steps, which are slower for weird reasons.
         # Alternately, and slightly more correctly in terms of benchmarking, we could do 10
         # steps with dummy data first, and then re-initialize the model and reset the loader.
@@ -464,7 +464,7 @@ def main():
                 log_data["l2_params"] = math.sqrt(l2_params)
                 wandb.log(log_data, step=step)
 
-                log_line = f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms'
+                log_line = f'step:{step}/{args.steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms'
                 print(log_line)
                 with open(logfile, "a") as f:
                     f.write(log_line + '\n')
@@ -492,8 +492,8 @@ def main():
             torch.cuda.empty_cache()
 
         # bit confusing: we want to make sure to eval on 0th iteration
-        # but also after the very last iteration. so we loop for step <= num_iterations
-        # instead of just < num_iterations (one extra due to <=), only to do
+        # but also after the very last iteration. so we loop for step <= steps
+        # instead of just < steps (one extra due to <=), only to do
         # the validation/sampling one last time, and then we break right here as we're done.
         if last_step:
             break
@@ -533,7 +533,7 @@ def main():
         if master_process:
             wandb.log({"train/loss": train_loss.item(), "l2_grads": l2_grads.item()}, step=step + 1)
             approx_time = training_time_ms + 1000 * (time.time() - t0)
-            log_line = f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
+            log_line = f"step:{step+1}/{args.steps} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
             print(log_line)
             with open(logfile, "a") as f:
                 f.write(log_line + "\n")
