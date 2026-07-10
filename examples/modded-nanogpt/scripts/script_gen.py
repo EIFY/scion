@@ -1,6 +1,4 @@
-import collections, decimal, math, os, pathlib, statistics, sys, torch
-from dataclasses import dataclass
-from typing import Optional
+import collections, decimal, math, os, pathlib, sys, torch
 
 REPO = "/home/jason-chou/Downloads/scion/"
 GPT_DIR = os.path.join(REPO, "examples/modded-nanogpt/")
@@ -26,8 +24,8 @@ fixed = dict(
 # PYTHON = f"NUMEXPR_MAX_THREADS={N_THREADS} torchrun --standalone --nproc_per_node=8"
 # folder = "fineweb_edu_100BT-shuffled"
 # fixed = dict(
-#     input_bin=os.path.join(GPT_DIR, f"data/{folder}/fineweb_edu_train_*.bin"),
-#     input_val_bin=os.path.join(GPT_DIR, f"data/{folder}/fineweb_edu_val_*.bin"), batch_size=BS, device_batch_size=BS // 8, val_tokens=0)
+#     input_bin=f'"{folder}/fineweb_edu_train_*.bin"',
+#     input_val_bin=f'"{folder}/fineweb_edu_val_*.bin"', batch_size=BS, device_batch_size=BS // 8, val_tokens=0)
 
 
 def read_final_loss(p, steps):
@@ -106,7 +104,7 @@ class AutoTuner:
     def test_value(self, val):
         to_test = self.curr | val
         command, val_loss = test_params(curr=to_test)
-        return val, command, val_loss
+        return val, [command], val_loss
 
     def run(self):
         best_val, commands, val_loss = self.optimize()
@@ -128,10 +126,10 @@ class AutoTuner:
         commands.append('')
 
         for val in self.initial_values:
-            val, cmd, loss = self.test_value(val)
+            val, cmds, loss = self.test_value(val)
             done = done and bool(loss)
             self.values.append(val)
-            commands.append(cmd)
+            for cmd in cmds: commands.append(cmd)
             losses.append(loss)
 
         if done:
@@ -139,7 +137,7 @@ class AutoTuner:
                 nxt, nxt_ok = self.next_value()
                 if not nxt_ok:
                     break
-                nxt, nxt_cmd, loss = self.test_value(nxt)
+                nxt, nxt_cmds, loss = self.test_value(nxt)
                 if loss is None:
                     break
                 self.values.append(nxt)
@@ -148,7 +146,7 @@ class AutoTuner:
                 prev, prev_ok = self.prev_value()
                 if not prev_ok:
                     break
-                prev, prev_cmd, loss = self.test_value(prev)
+                prev, prev_cmds, loss = self.test_value(prev)
                 if loss is None:
                     break
                 self.values.appendleft(prev)
@@ -165,7 +163,7 @@ class AutoTuner:
                 commands.append(f"# {pen} > {ult}:")
                 commands.append('')
             done = False
-            commands.append(nxt_cmd)
+            for nxt_cmd in nxt_cmds: commands.append(nxt_cmd)
 
         if done and len(self.values) >= 2:
             first, second = losses[0], losses[1]
@@ -176,7 +174,7 @@ class AutoTuner:
                 commands.append(f"# {first} < {second}:")
                 commands.append('')
             done = False
-            commands.append(prev_cmd)
+            for prev_cmd in prev_cmds: commands.append(prev_cmd)
 
         if done:
             final_loss, index = min((loss, i) for i, loss in enumerate(losses))
@@ -274,6 +272,110 @@ class MomentumAutoTuner(AutoTuner):
         return dict(momentum=mo, lr=lr), True
 
 
+class PowerAutoTuner(AutoTuner):
+
+    def __init__(self, key, initial_val, diff, curr, f):
+        self.key = key
+        self.diff = diff
+        super().__init__(initial_values=[{self.key: initial_val}], curr=curr, f=f)
+
+    def next_value(self):
+        nxt_val = dict(self.values[-1])
+        nxt_val[self.key] += self.diff
+        return nxt_val, True
+
+    def prev_value(self):
+        prev_val = dict(self.values[0])
+        prev_val[self.key] -= self.diff
+        if almost_eq(prev_val[self.key], 0.0):
+            return None, False
+        return prev_val, True
+
+
+class CosPowerAutoTuner(AutoTuner):
+
+    def __init__(self, key, initial_val, diff, curr, f):
+        self.key = key
+        self.diff = diff
+        if almost_eq(initial_val, 1.0):
+            initial_val = None
+        super().__init__(initial_values=[{self.key: initial_val}], curr=curr, f=f)
+
+    def next_value(self):
+        nxt_val = self.values[-1][self.key]
+        if nxt_val is None:
+            nxt_val = 1.0
+        nxt_val += self.diff
+        if almost_eq(nxt_val, 1.0):
+            nxt_val = None
+        return {self.key: nxt_val}, True
+
+    def prev_value(self):
+        prev_val = self.values[0][self.key]
+        if prev_val is None:
+            prev_val = 1.0
+        prev_val -= self.diff
+        if almost_eq(prev_val, 0.0):
+            return None, False
+        if almost_eq(prev_val, 1.0):
+            prev_val = None
+        return {self.key: prev_val}, True
+
+
+class LRPowerAutoTuner(AutoTuner):
+    """Nested AutoTuner for LR & schedule power"""
+    def __init__(self, factor, initial_value, comp, p_tuner, key, diff, curr, f):
+        self.factor = factor
+        self.comp = comp
+        self.p_tuner = p_tuner
+        self.key = key
+        self.diff = diff
+        super().__init__(initial_values=[initial_value], curr=curr, f=f)
+
+    def test_value(self, val):
+        commands = [f"# Inner {self.key} optimization:"]
+        tuner = self.p_tuner(key=self.key, initial_val=val[self.key], diff=self.diff, curr=self.curr | val, f=self.f)
+        best_p, cmds, acc = tuner.optimize()
+        val |= best_p
+        commands.extend(cmds)
+        return val, commands, acc  # All commands tuner ordered are necessary.
+
+    def next_value(self):
+        nxt_lr = dict(self.values[-1])
+        nxt_lr['lr'] *= self.factor
+        if nxt_lr[self.key] is None:
+            nxt_lr[self.key] = 1.0
+        nxt_lr[self.key] += self.comp
+        return nxt_lr, True
+
+    def prev_value(self):
+        prev_lr = dict(self.values[0])
+        prev_lr['lr'] /= self.factor
+        if prev_lr[self.key] is None:
+            prev_lr[self.key] = 1.0
+        prev_lr[self.key] -= self.comp
+        prev_lr[self.key] = max(prev_lr[self.key], self.diff)
+        return prev_lr, True
+
+
+class JointCsqLRTuner(AutoTuner):
+    """Jointly tune c_sq and lr based on rel. LR"""
+    def __init__(self, factor, curr, f):
+        assert curr['corrected'] == '', 'Must be a corrected experiment'
+        self.factor = factor
+        super().__init__(initial_values=[{'c_sq': curr['c_sq'], 'lr': curr['lr']}], curr=curr, f=f)
+
+    def next_value(self):
+        curr = self.values[-1]
+        next_val = {'c_sq': curr['c_sq'] * self.factor, 'lr': curr['lr'] * math.sqrt(self.factor)}
+        return next_val, True
+
+    def prev_value(self):
+        curr = self.values[0]
+        prev_val = {'c_sq': curr['c_sq'] / self.factor, 'lr': curr['lr'] / math.sqrt(self.factor)}
+        return prev_val, True
+
+
 class EndMoRatioAutoTuner(AutoTuner):
 
     def __init__(self, factor, curr, f):
@@ -319,6 +421,7 @@ def copy_end_mo(curr, new_mo, key='timescale_inv'):
 class MoschAutoTuner(MomentumAutoTuner):
     """Nested AutoTuner for momentum schedule"""
     def __init__(self, factor, curr, f):
+        # TODO: set sign_mo when necessary to keep it constant throughout tuning
         self.key = 'timescale_inv'
         self.factor = factor
         super().__init__(curr, f)
@@ -344,42 +447,6 @@ class MoschAutoTuner(MomentumAutoTuner):
         return prev, ok
 
 
-@dataclass
-class Hyperparameters:
-    # data hyperparams
-    name : Optional[str] = None
-    input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
-    input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
-    # optimization hyperparams
-    batch_size : int = 8*64 # batch size, in sequences, across all devices
-    device_batch_size : int = 64 # batch size, in sequences, per device
-    sequence_length : int = 1024 # sequence length, in tokens
-    num_iterations : int = 0 # number of iterations to run. Defaults to 1 epoch
-    seed : Optional[int] = None # change to an int to shuffle files and offsets
-    lr : float = 2 ** -12 * 50
-    corrected : bool = False
-    c_sq : float = 5.79833984375 # (2 - 0.1) / (2 * 0.1) * 2 ** -12 * 50 ** 2
-    wd : float = 1 / 50
-    sign_lr : float = 2 ** -12 * 3000
-    sign_wd : float = 1 / 3000
-    grad_clip_norm : float = 1000000. # effectively no clipping
-    # evaluation and logging hyperparams
-    val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens : int = 10485761 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons.
-    save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
-    n_layer : int = 12
-    n_head : int = 6 # set as n_embd/128 so head_dim is 128
-    n_embd : int = 768
-    momentum : float = 0.1
-    timescale_inv : float = 0.0
-    end_c_sq_mul : float = 1.0
-    cautious : bool = False
-    cut : bool = False # Use cut_cross_entropy
-    nesterov : bool = False
-    sign_mo : Optional[float] = None # Momentum for sign paramters, defaults to momentum
-    sign_ne : Optional[bool] = None # Nesterov or not for sign parameters, defaults to nesterov
-
-
 # None is tombstone value, '' (empty string) is for store_true flags
 default = dict(
     steps=BUDGET,
@@ -391,7 +458,10 @@ default = dict(
     wd=None,
     sign_wd=1 / 3000,
     nesterov=None,
-    timescale_inv=None
+    cos_power=None,
+    power=None,
+    timescale_inv=None,
+    sign_mo=None,
 )
 
 # old_open = open
@@ -490,7 +560,88 @@ for default['corrected'] in ('', None):
     if not final_val_loss:
         sys.exit()
 
+    with open(file_prefix + "power.sh", "w") as f:
+
+        print(preface, file=f)
+        print("# Polynomial decay power tuning:", file=f)
+
+        key = 'power'
+        initial_val = 1.0
+        initial_value = {key: initial_val, 'lr': default['lr']}
+        tuner = LRPowerAutoTuner(
+            factor=2**0.5, initial_value=initial_value, comp=0.5, p_tuner=PowerAutoTuner, key=key, diff=0.2, curr=default, f=f)
+        power_default, final_val_loss = tuner.run()
+
+    if not final_val_loss:
+        sys.exit()
+
+    with open(file_prefix + "power.sh", "w") as f:
+
+        print(preface, file=f)
+        print("# Polynomial decay power tuning:", file=f)
+
+        key = 'power'
+        initial_val = power_default[key]
+        tuner = PowerAutoTuner(key=key, initial_val=initial_val, diff=0.1, curr=power_default, f=f)
+        power_default, final_val_loss = tuner.run()
+
+    if not final_val_loss:
+        sys.exit()
+
+    with open(file_prefix + "cos_power.sh", "w") as f:
+
+        print(preface, file=f)
+        print("# Cosine decay power tuning:", file=f)
+
+        key = 'cos_power'
+        initial_val = 1.0
+        initial_value = {key: initial_val, 'lr': default['lr']}
+        tuner = LRPowerAutoTuner(
+            factor=2**0.5, initial_value=initial_value, comp=0.5, p_tuner=CosPowerAutoTuner, key=key, diff=0.2, curr=default, f=f)
+        default, final_val_loss = tuner.run()
+
+    if not final_val_loss:
+        sys.exit()
+
+    with open(file_prefix + "cos_power.sh", "w") as f:
+
+        print(preface, file=f)
+        print("# Cosine decay power tuning:", file=f)
+
+        key = 'cos_power'
+        initial_val = default[key]
+        tuner = CosPowerAutoTuner(key=key, initial_val=initial_val, diff=0.1, curr=default, f=f)
+        default, final_val_loss = tuner.run()
+
+    if not final_val_loss:
+        sys.exit()
+
+    with open(file_prefix + "cosine_power_comparison.sh", "w") as f:
+
+        print(preface, file=f)
+        print("# Cosine vs. polynomial decay:", file=f)
+
+        initial_values = [{'cos_power': default['cos_power'], 'lr': default['lr']}]
+        initial_values.append({'power': power_default['power'], 'lr': power_default['lr']})
+        default['cos_power'] = None
+
+        tuner = AutoTuner(initial_values=initial_values, curr=default, f=f)
+        default, final_val_loss = tuner.run()
+
+    if not final_val_loss:
+        sys.exit()
+
     if default.get('corrected') == '':
+
+        with open(file_prefix + "c_sq_lr.sh", "w") as f:
+
+            print(preface, file=f)
+            print("# Joint c_sq and lr tuning:", file=f)
+            tuner = JointCsqLRTuner(factor=2 ** 0.5, curr=default, f=f)
+            default, final_val_loss = tuner.run()
+
+        if not final_val_loss:
+            sys.exit()
 
         with open(file_prefix + "lr_eff_transfer.sh", "w") as f:
 
@@ -553,9 +704,11 @@ for default['corrected'] in ('', None):
         # Initial WD guess: half of the initial WD of the best corrected counterpart,
         # so the average throughout the training is about the same
         default['wd'], default['c_sq'] = initial_wd / 2, None
+        # Reset fancy schedule
+        default['cos_power'] = default['power'] = None
 
 pathlib.Path('done').touch()
 print('Done!')
 
 # print(files_opened)
-# ['corrected_lr.sh', 'corrected_wd.sh', 'corrected_nesterov.sh', 'corrected_momentum.sh', 'corrected_sign_lr.sh', 'corrected_sign_wd.sh', 'corrected_lr_eff_transfer.sh', 'corrected_mo_baseline_comparison.sh', 'lr.sh', 'wd.sh', 'nesterov.sh', 'momentum.sh', 'sign_lr.sh', 'sign_wd.sh', 'done']
+# ['corrected_lr.sh', 'corrected_wd.sh', 'corrected_nesterov.sh', 'corrected_momentum.sh', 'corrected_sign_lr.sh', 'corrected_sign_wd.sh', 'corrected_power.sh', 'corrected_cos_power.sh', 'corrected_cosine_power_comparison.sh', 'corrected_c_sq_lr.sh', 'corrected_lr_eff_transfer.sh', 'corrected_mo_baseline_comparison.sh', 'lr.sh', 'wd.sh', 'nesterov.sh', 'momentum.sh', 'sign_lr.sh', 'sign_wd.sh', 'power.sh', 'cos_power.sh', 'cosine_power_comparison.sh', 'done']
