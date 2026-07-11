@@ -409,22 +409,24 @@ class EndMoRatioAutoTuner(AutoTuner):
 
 def copy_end_mo(curr, new_mo, key='timescale_inv'):
     inv = curr.get(key) or 0.0
-    steps = self.curr.get('steps') or N_STEP
+    steps = curr.get('steps') or N_STEP
     end_mo = float(curr['momentum']) / (1. + steps * inv)
     # new_mo / (1 + steps * inv) = end_mo
     # new_mo / end_mo = 1 + steps * inv
     # inv = (new_mo / end_mo - 1) / steps
-    new_inv = (new_mo / end_mo - 1.) / steps
+    new_inv = (float(new_mo) / end_mo - 1.) / steps
     return None if almost_eq(new_inv, 0.0) else new_inv
 
 
 class MoschAutoTuner(MomentumAutoTuner):
     """Nested AutoTuner for momentum schedule"""
     def __init__(self, factor, curr, f):
-        # TODO: set sign_mo when necessary to keep it constant throughout tuning
         self.key = 'timescale_inv'
         self.factor = factor
         super().__init__(curr, f)
+        self.sign_mo = self.curr.get('sign_mo')
+        if self.sign_mo is None:
+            self.sign_mo = self.curr['momentum']
 
     def test_value(self, val):
         commands = [f"# Inner {self.key} optimization:"]
@@ -434,16 +436,22 @@ class MoschAutoTuner(MomentumAutoTuner):
         commands.extend(cmds)
         return val, commands, val_loss  # All commoands ratio_tuner ordered are necessary.
 
+    def set_sign_mo(self, val):
+        """Set sign_mo when necessary to keep it constant throughout tuning"""
+        val['sign_mo'] = None if almost_eq(self.sign_mo, val['momentum']) else self.sign_mo
+
     def next_value(self):
         nxt, ok = super().next_value()
         if ok:
             nxt[self.key] = copy_end_mo(self.values[-1], nxt['momentum'], self.key)
+            self.set_sign_mo(nxt)
         return nxt, ok
 
     def prev_value(self):
         prev, ok = super().prev_value()
         if ok:
             prev[self.key] = copy_end_mo(self.values[0], prev['momentum'], self.key)
+            self.set_sign_mo(prev)
         return prev, ok
 
 
@@ -693,9 +701,43 @@ for default['corrected'] in ('', None):
         if not final_val_loss:
             sys.exit()
 
+    with open(file_prefix + "full.sh", "w") as f:
+
+        print(preface, file=f)
+        print("# With all the training tokens:", file=f)
+        full = dict(default)
+        full['steps'] = None
+        cmd, final_val_loss = test_params(curr=full)
+        print(cmd, file=f)
+
+    if not final_val_loss:
+        sys.exit()
+
     if default.get('corrected') == '':
 
         corrected_default = dict(default)
+
+        with open(file_prefix + "mosch.sh", "w") as f:
+
+            print(preface, file=f)
+            print("# Momentum scheduling!", file=f)
+            tuner = MoschAutoTuner(factor=2 ** 0.5, curr=corrected_default, f=f)
+            corrected_default, final_val_loss = tuner.run()
+
+        if not final_val_loss:
+            sys.exit()
+
+        with open(file_prefix + "mosch_full.sh", "w") as f:
+
+            print(preface, file=f)
+            print("# Does the log-time factor stay the same as expected?", file=f)
+            full = dict(corrected_default)
+            full['steps'] = None
+            tuner = EndMoRatioAutoTuner(factor=2 ** 0.5, curr=full, f=f)
+            full, final_val_loss = tuner.run()
+
+        if not final_val_loss:
+            sys.exit()
 
         # Prepare uncorrected default
         c_sq = default['c_sq']
@@ -711,4 +753,4 @@ pathlib.Path('done').touch()
 print('Done!')
 
 # print(files_opened)
-# ['corrected_lr.sh', 'corrected_wd.sh', 'corrected_nesterov.sh', 'corrected_momentum.sh', 'corrected_sign_lr.sh', 'corrected_sign_wd.sh', 'corrected_power.sh', 'corrected_cos_power.sh', 'corrected_cosine_power_comparison.sh', 'corrected_c_sq_lr.sh', 'corrected_lr_eff_transfer.sh', 'corrected_mo_baseline_comparison.sh', 'lr.sh', 'wd.sh', 'nesterov.sh', 'momentum.sh', 'sign_lr.sh', 'sign_wd.sh', 'power.sh', 'cos_power.sh', 'cosine_power_comparison.sh', 'done']
+# ['corrected_lr.sh', 'corrected_wd.sh', 'corrected_nesterov.sh', 'corrected_momentum.sh', 'corrected_sign_lr.sh', 'corrected_sign_wd.sh', 'corrected_power.sh', 'corrected_cos_power.sh', 'corrected_cosine_power_comparison.sh', 'corrected_c_sq_lr.sh', 'corrected_lr_eff_transfer.sh', 'corrected_mo_baseline_comparison.sh', 'corrected_full.sh', 'corrected_mosch.sh', 'corrected_mosch_full.sh', 'lr.sh', 'wd.sh', 'nesterov.sh', 'momentum.sh', 'sign_lr.sh', 'sign_wd.sh', 'power.sh', 'cos_power.sh', 'cosine_power_comparison.sh', 'full.sh', 'done']
