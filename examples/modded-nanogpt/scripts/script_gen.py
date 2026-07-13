@@ -1,6 +1,6 @@
 import collections, decimal, math, os, pathlib, sys, torch
 
-REPO = "/home/jason-chou/Downloads/scion/"
+REPO = "$HOME/Downloads/scion/"
 GPT_DIR = os.path.join(REPO, "examples/modded-nanogpt/")
 
 # For testing:
@@ -50,7 +50,7 @@ git -C {REPO} checkout {branch}
 prefix = "$PYTHON $TRAIN "
 
 def run_name(opt, d):
-    l = [opt]
+    l = [opt] if opt else []
     for k, v in d.items():
         if v is not None:
             l.append(k)
