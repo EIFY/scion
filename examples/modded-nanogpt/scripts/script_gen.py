@@ -39,7 +39,7 @@ def read_final_loss(p, steps):
         val_loss = ckpt['val_loss']
     return val_loss
 
-branch = 'log-time'
+branch = 'row-norm'
 
 preface = f"""#!/bin/bash
 
