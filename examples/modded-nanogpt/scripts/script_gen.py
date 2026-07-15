@@ -465,6 +465,7 @@ class MoschAutoTuner(MomentumAutoTuner):
 
 # None is tombstone value, '' (empty string) is for store_true flags
 default = dict(
+    row_norm='',
     steps=BUDGET,
     corrected='',
     momentum=0.1,

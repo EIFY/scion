@@ -90,6 +90,60 @@ class Spectral(Norm):
         return F.cosine_similarity(w @ v, -update.to(v) @ v, dim=-2, eps=eps).squeeze(-1)
 
 
+class RowNorm(Norm):
+    """
+    Row-wise normalization.
+
+    Args:
+        normalized (bool, optional): If True, normalizes by the input dimension. Use False only for the input layer.
+        transpose (bool, optional): If True, transposes input before normalization. Use True for embedding layers
+                which store weights as (vocab_size, embedding_dim).
+    """
+    def __init__(self, normalized=True, transpose=False):
+        self.normalized = normalized
+        self.transpose = transpose
+
+    @torch.compile
+    def lmo(self, g):
+        if self.transpose:
+            g = g.transpose(0, 1)
+        rms_values = torch.sqrt(torch.sum(g ** 2, dim=-1, keepdim=True))
+        if self.normalized:
+            rms_values *= math.sqrt(g.size(-1))
+        g = g / (rms_values + eps)
+        if self.transpose:
+            g = g.transpose(0, 1)
+        return g
+
+    def norm(self, w, v, repeat=1):
+        norm = torch.amax(torch.linalg.vector_norm(w, dim=-1), dim=-1)
+        if self.normalized:
+            d_in = w.size(-1)
+            norm *= math.sqrt(d_in)
+        return norm, v
+
+    def init(self, w, init_dtype=torch.float64):
+        dtype = w.data.dtype
+        if self.transpose:
+            w.data = w.data.transpose(0, 1)
+        torch.nn.init.normal_(w.data)
+        w.data /= w.norm(dim=-1, keepdim=True)
+        if self.normalized:
+            w.data /= math.sqrt(w.size(-1))
+        w.data = w.data.to(dtype=dtype)
+        if self.transpose:
+            w.data = w.data.transpose(0, 1)
+        return torch.tensor(1.).to(w), w.new_empty((0,))
+
+    def norm_shape(self, w):
+        return ()
+
+    smoothness_shape = norm_shape
+
+    def singular_shape(self, w):
+        return (0,)
+
+
 class Sign(Norm):
     def __init__(self, zero_init=False, normalized=True):
         self.zero_init = zero_init
@@ -131,6 +185,7 @@ class Sign(Norm):
 
 norm_dict = {
     'Spectral': Spectral,
+    'RowNorm': RowNorm,
     'Sign': Sign,
 }
 
@@ -300,14 +355,17 @@ class Scion(torch.optim.Optimizer):
         self.sync_state_for('norm')
         spectral = []
         sign = []
+        row = []
         for group in self.param_groups:
             for p in group['params']:
                 norm = self.state[p]['norm']
                 if group['norm'].startswith('Spectral'):
                     spectral.extend(norm.flatten().tolist())
+                elif group['norm'] == 'RowNorm':
+                    row.extend(norm.flatten().tolist())
                 else:
                     sign.append(norm.item())
-        return math.prod(spectral) ** (1 / len(spectral)), math.fsum(sign) / len(sign)
+        return math.prod(spectral) ** (1 / len(spectral)) if spectral else None, math.fsum(sign) / len(sign), math.fsum(row) / len(row) if row else None
 
     @torch.no_grad()
     def init(self):

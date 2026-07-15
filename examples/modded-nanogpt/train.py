@@ -232,6 +232,7 @@ class Hyperparameters:
     input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
     input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
+    row_norm : bool = False
     batch_size : int = 8*64 # batch size, in sequences, across all devices
     device_batch_size : int = 64 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
@@ -328,16 +329,22 @@ def main():
     raw_model = model.module # always contains the "raw" unwrapped model
     ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
+    hidden = {
+        'params': raw_model.transformer.h.parameters(),
+        'corrected': args.corrected,
+        'weight_decay': args.wd,
+        'c_sq': args.c_sq,
+    }
+
+    if args.row_norm:
+        hidden['norm'] = 'RowNorm'
+    else:
+        hidden['norm'] = 'Spectral'
+        hidden['norm_kwargs'] = {'steps': 5}
+
     # init the optimizer(s)
     optim_groups = [
-        {
-            'params': raw_model.transformer.h.parameters(),
-            'norm': 'Spectral',
-            'norm_kwargs': {'steps': 5},
-            'corrected': args.corrected,
-            'weight_decay': args.wd,
-            'c_sq': args.c_sq,
-        }, {
+        hidden, {
             'params': raw_model.lm_head.parameters(),
             'norm': 'Sign',
             'norm_kwargs': {},
@@ -447,7 +454,7 @@ def main():
             if master_process:
 
                 log_data = {}
-                log_data['spectral_norm'], log_data['sign_norm'] = optimizer.report_norms()
+                log_data['spectral_norm'], log_data['sign_norm'], log_data['row_norm'] = optimizer.report_norms()
 
                 hidden_group = optimizer.param_groups[0]
                 lr, mo = hidden_group['lr'], hidden_group['momentum']
