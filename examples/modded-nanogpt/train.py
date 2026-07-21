@@ -516,6 +516,7 @@ def main():
             p.grad /= train_accumulation_steps
 
         l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
+        head_grads_sq = sum(p.grad.square().sum().item() for p in raw_model.lm_head.parameters())
 
         # step the optimizers and schedulers
         optimizer.step()
@@ -529,7 +530,12 @@ def main():
 
         #dist.all_reduce(train_loss, op=dist.ReduceOp.AVG) # all-reducing the training loss would be more correct in terms of logging, but slower
         if master_process:
-            wandb.log({"train/loss": train_loss.item(), "l2_grads": l2_grads.item()}, step=step + 1)
+            l2_grads = l2_grads.item()
+            l2_head_grads = math.sqrt(head_grads_sq)
+            l2_hidden_grads = math.sqrt(l2_grads ** 2 - head_grads_sq)
+            log_data = dict(l2_grads=l2_grads, l2_head_grads=l2_head_grads, l2_hidden_grads=l2_hidden_grads)
+            log_data["train/loss"] = train_loss.item()
+            wandb.log(log_data, step=step + 1)
             approx_time = training_time_ms + 1000 * (time.time() - t0)
             log_line = f"step:{step+1}/{args.steps} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms"
             print(log_line)
