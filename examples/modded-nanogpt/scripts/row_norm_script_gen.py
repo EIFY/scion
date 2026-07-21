@@ -5,27 +5,29 @@ GPT_DIR = os.path.join(REPO, "examples/modded-nanogpt/")
 
 # For testing:
 
-OPT = 'scion'
-BUDGET = 10
-N_STEP = 21
-PYTHON = "torchrun"
-folder = "test"
-fixed = dict(
-    input_bin=f'"{folder}/fineweb_edu_train_*.bin"',
-    input_val_bin=f'"{folder}/fineweb_edu_val_*.bin"', batch_size=1, device_batch_size=1, val_tokens=0, sequence_length=4)
+# OPT = 'scion'
+# BUDGET = 10
+# N_STEP = 21
+# ENV = ''
+# PYTHON = "torchrun"
+# folder = "test"
+# fixed = dict(
+#     input_bin=f'"{folder}/fineweb_edu_train_*.bin"',
+#     input_val_bin=f'"{folder}/fineweb_edu_val_*.bin"', batch_size=1, device_batch_size=1, val_tokens=0, sequence_length=4)
 
 # For production:
 
-# OPT = ''
-# N_STEP = 190734 # Roughly speaking, to be filled in
-# BUDGET = N_STEP * 3 // 10
-# BS = 512
-# N_THREADS = 208
-# PYTHON = f"NUMEXPR_MAX_THREADS={N_THREADS} torchrun --standalone --nproc_per_node=8"
-# folder = "fineweb_edu_100BT-shuffled"
-# fixed = dict(
-#     input_bin=f'"{folder}/fineweb_edu_train_*.bin"',
-#     input_val_bin=f'"{folder}/fineweb_edu_val_*.bin"', batch_size=BS, device_batch_size=BS // 8, val_tokens=0)
+OPT = ''
+N_STEP = 100835
+BUDGET = N_STEP * 3 // 10
+BS = 1024
+N_THREADS = 208
+ENV = f"NUMEXPR_MAX_THREADS={N_THREADS} OMP_NUM_THREADS=13 "
+PYTHON = "torchrun --standalone --nproc_per_node=8"
+folder = "fineweb_edu_100BT-shuffled"
+fixed = dict(
+    input_bin=f'"{folder}/fineweb_edu_train_*.bin"',
+    input_val_bin=f'"{folder}/fineweb_edu_val_*.bin"', batch_size=BS, device_batch_size=BS // 8, val_tokens=0)
 
 
 def read_final_loss(p, steps):
@@ -47,7 +49,7 @@ PYTHON="{PYTHON}"
 git -C {REPO} checkout {branch}
 """
 
-prefix = "$PYTHON $TRAIN "
+prefix = ENV + "$PYTHON $TRAIN "
 
 def run_name(opt, d):
     l = [opt] if opt else []
