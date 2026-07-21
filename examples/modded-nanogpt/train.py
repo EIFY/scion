@@ -456,7 +456,10 @@ def main():
 
                 final_val_loss = log_data["val/loss"] = val_loss
                 l2_params = sum(p.data.square().sum().item() for p in model.parameters())
+                l2_head_params = sum(p.data.square().sum().item() for p in raw_model.lm_head.parameters())
                 log_data["l2_params"] = math.sqrt(l2_params)
+                log_data["l2_head_params"] = math.sqrt(l2_head_params)
+                log_data["l2_hidden_params"] = math.sqrt(l2_params - l2_head_params)
                 wandb.log(log_data, step=step)
 
                 log_line = f'step:{step}/{args.steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms'
