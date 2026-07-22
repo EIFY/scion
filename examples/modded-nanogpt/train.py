@@ -455,8 +455,9 @@ def main():
                 log_data["effective_lr"] = effective_lr
 
                 final_val_loss = log_data["val/loss"] = val_loss
-                l2_params = sum(p.data.square().sum().item() for p in model.parameters())
-                l2_head_params = sum(p.data.square().sum().item() for p in raw_model.lm_head.parameters())
+                with torch.no_grad():
+                    l2_params = sum(p.data.square().sum().item() for p in model.parameters())
+                    l2_head_params = sum(p.data.square().sum().item() for p in raw_model.lm_head.parameters())
                 log_data["l2_params"] = math.sqrt(l2_params)
                 log_data["l2_head_params"] = math.sqrt(l2_head_params)
                 log_data["l2_hidden_params"] = math.sqrt(l2_params - l2_head_params)
@@ -516,7 +517,8 @@ def main():
             p.grad /= train_accumulation_steps
 
         l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
-        head_grads_sq = sum(p.grad.square().sum().item() for p in raw_model.lm_head.parameters())
+        if master_process:
+            head_grads_sq = sum(p.grad.square().sum().item() for p in raw_model.lm_head.parameters())
 
         # step the optimizers and schedulers
         optimizer.step()
