@@ -119,6 +119,7 @@ class GPTConfig:
     n_layer : int = 12
     n_head : int = 6 # head dim 128 suggested by @Grad62304977
     n_embd : int = 768
+    tying : bool = False
 
 class GPT(nn.Module):
 
@@ -131,7 +132,8 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying # CHANGE
+        if config.tying:
+            self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying # CHANGE
 
     def forward(self, idx, target):
 
@@ -254,6 +256,7 @@ class Hyperparameters:
     n_layer : int = 12
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
+    tying : bool = False
     momentum : float = 0.1
     timescale_inv : float = 0.0
     end_c_sq_mul : float = 1.0
@@ -319,7 +322,7 @@ def main():
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
     # this originates from Karpathy's experiments.
     num_vocab = 50304
-    model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd))
+    model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd, tying=args.tying))
     model = model.cuda()
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True # suggested by @Chillee
@@ -329,8 +332,11 @@ def main():
     raw_model = model.module # always contains the "raw" unwrapped model
     ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
+    hidden_module = raw_model.transformer
+    if args.tying:
+        hidden_module = hidden_module.h
     hidden = {
-        'params': raw_model.transformer.h.parameters(),
+        'params': hidden_module.parameters(),
         'corrected': args.corrected,
         'weight_decay': args.wd,
         'c_sq': args.c_sq,
