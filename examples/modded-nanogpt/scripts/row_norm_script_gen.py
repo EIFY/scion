@@ -39,7 +39,7 @@ def read_final_loss(p, steps):
         val_loss = ckpt['val_loss']
     return val_loss
 
-branch = 'row-norm'
+branch = 'log-time'
 
 preface = f"""#!/bin/bash
 
@@ -252,7 +252,7 @@ class JointCsqLRTuner(AutoTuner):
 # None is tombstone value, '' (empty string) is for store_true flags
 # TODO: Update with the optimized default
 default = dict(
-    row_norm='',
+    row_norm=None,
     steps=BUDGET,
     corrected='',
     momentum=0.1,
@@ -268,7 +268,37 @@ default = dict(
     sign_mo=None,
 )
 
+with open("rel_lr.sh", "w") as f:
+    print(preface, file=f)
+    print("# Near-scale-invariant relative LR:", file=f)
+    losses = {}
+    curr = dict(default)
+    factors = [0.5, 2**-0.5, 1., 2**0.5, 2.0]
+    for lr_f in factors:
+        for c_sq_f in factors:
+            curr['lr'] = lr_f * math.sqrt(c_sq_f) * default['lr']
+            curr['c_sq'] = c_sq_f * default['c_sq']
+
+            cmd, val_loss = test_params(curr=curr)
+            losses[curr['lr'], curr['c_sq']] = val_loss
+            print(cmd, file=f)
+
+if not all(losses.values()):
+    sys.exit()
+
+branch = 'row-norm'
+
+preface = f"""#!/bin/bash
+
+TRAIN={os.path.join(GPT_DIR, "train.py")}
+PYTHON="{PYTHON}"
+
+git -C {REPO} checkout {branch}
+"""
+
+default['row_norm'] = ''
 file_prefix = 'row_norm_'
+
 with open(file_prefix + "lr.sh", "w") as f:
 
     print(preface, file=f)
