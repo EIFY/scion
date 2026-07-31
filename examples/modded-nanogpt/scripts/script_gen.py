@@ -35,7 +35,7 @@ def read_final_loss(p, steps):
     ckpt_path = os.path.join(p, LAST_CKPT)
     val_loss = None
     if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, weights_only=True)
+        ckpt = torch.load(ckpt_path, weights_only=False)
         val_loss = ckpt['val_loss']
     return val_loss
 
