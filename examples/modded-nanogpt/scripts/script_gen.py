@@ -387,7 +387,7 @@ class JointCsqLRTuner(AutoTuner):
 class EndMoRatioAutoTuner(AutoTuner):
 
     def __init__(self, factor, curr, f):
-        self.key = 'timescale_inv'
+        self.key = 'q'
         self.factor = factor
         self.max_ratio = 1 / float(curr['momentum'])  # Doesn't make sense to have momentum > 1, right?
         super().__init__(initial_values=[{self.key: curr.get(self.key)}], curr=curr, f=f)
@@ -415,7 +415,7 @@ class EndMoRatioAutoTuner(AutoTuner):
         return {self.key: new_inv}, True
 
 
-def copy_end_mo(curr, new_mo, key='timescale_inv'):
+def copy_end_mo(curr, new_mo, key='q'):
     inv = curr.get(key) or 0.0
     steps = curr.get('steps') or N_STEP
     end_mo = float(curr['momentum']) / (1. + steps * inv)
@@ -429,7 +429,7 @@ def copy_end_mo(curr, new_mo, key='timescale_inv'):
 class MoschAutoTuner(MomentumAutoTuner):
     """Nested AutoTuner for momentum schedule"""
     def __init__(self, factor, curr, f):
-        self.key = 'timescale_inv'
+        self.key = 'q'
         self.factor = factor
         super().__init__(curr, f)
         self.sign_mo = self.curr.get('sign_mo')
@@ -476,7 +476,7 @@ default = dict(
     nesterov=None,
     cos_power=None,
     power=None,
-    timescale_inv=None,
+    q=None,
     sign_mo=None,
 )
 

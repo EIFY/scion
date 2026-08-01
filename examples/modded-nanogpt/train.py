@@ -254,7 +254,7 @@ class Hyperparameters:
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
     momentum : float = 0.1
-    timescale_inv : float = 0.0
+    q : float = 0.0
     end_c_sq_mul : float = 1.0
     cautious : bool = False
     nesterov : bool = False
@@ -372,7 +372,7 @@ def main():
     lr_ratio = cosine_lr if args.power is None else polynomial_lr
 
     def momentum(step):
-        return args.momentum * (1 / (1 + step * args.timescale_inv))
+        return args.momentum * (1 / (1 + step * args.q))
 
     def scheduler(group, step):
         ratio = lr_ratio(step)
