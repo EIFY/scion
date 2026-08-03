@@ -1,6 +1,6 @@
 #!/bin/bash
 
-scripts=("rel_lr.sh" "row_norm_lr.sh" "row_norm_wd.sh" "row_norm_sign_lr.sh" "row_norm_sign_wd.sh" "row_norm_c_sq_lr.sh" "row_norm_lr_eff_transfer.sh" "row_norm_done")
+scripts=("rerun_power.sh" "rerun_cos_power.sh" "rerun_cosine_power_comparison.sh" "rel_lr.sh" "row_norm_lr.sh" "row_norm_wd.sh" "row_norm_sign_lr.sh" "row_norm_sign_wd.sh" "row_norm_c_sq_lr.sh" "row_norm_lr_eff_transfer.sh" "row_norm_done")
 
 len=${#scripts[@]}
 

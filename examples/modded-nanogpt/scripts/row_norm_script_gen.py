@@ -231,6 +231,98 @@ def prev_mo(mo):
     return mo.normalize()
 
 
+class PowerAutoTuner(AutoTuner):
+
+    def __init__(self, key, initial_val, diff, curr, f):
+        self.key = key
+        self.diff = diff
+        super().__init__(initial_values=[{self.key: initial_val}], curr=curr, f=f)
+
+    def next_value(self):
+        nxt_val = dict(self.values[-1])
+        nxt_val[self.key] += self.diff
+        return nxt_val, True
+
+    def prev_value(self):
+        prev_val = dict(self.values[0])
+        prev_val[self.key] -= self.diff
+        if almost_eq(prev_val[self.key], 0.0):
+            return None, False
+        return prev_val, True
+
+
+class CosPowerAutoTuner(AutoTuner):
+
+    def __init__(self, key, initial_val, diff, curr, f):
+        self.key = key
+        self.diff = diff
+        if type(initial_val) is float and almost_eq(initial_val, 1.0):
+            initial_val = None
+        super().__init__(initial_values=[{self.key: initial_val}], curr=curr, f=f)
+
+    def next_value(self):
+        nxt_val = self.values[-1][self.key]
+        if nxt_val is None:
+            nxt_val = 1.0
+        nxt_val += self.diff
+        if almost_eq(nxt_val, 1.0):
+            nxt_val = None
+        return {self.key: nxt_val}, True
+
+    def prev_value(self):
+        prev_val = self.values[0][self.key]
+        if prev_val is None:
+            prev_val = 1.0
+        prev_val -= self.diff
+        if almost_eq(prev_val, 0.0):
+            return None, False
+        if almost_eq(prev_val, 1.0):
+            prev_val = None
+        return {self.key: prev_val}, True
+
+
+class LRPowerAutoTuner(AutoTuner):
+    """Nested AutoTuner for LR & schedule power"""
+    def __init__(self, factor, initial_value, comp, p_tuner, key, coarse, fine, curr, f):
+        self.factor = factor
+        self.comp = comp
+        self.p_tuner = p_tuner
+        self.key = key
+        self.coarse = coarse
+        self.fine = fine
+        super().__init__(initial_values=[initial_value], curr=curr, f=f)
+
+    def test_value(self, val):
+        commands = [f"# Inner {self.key} optimization:"]
+        tuner = self.p_tuner(key=self.key, initial_val=val[self.key], diff=self.coarse, curr=self.curr | val, f=self.f)
+        best_p, cmds, val_loss = tuner.optimize()
+        val |= best_p
+        commands.extend(cmds)
+        if val_loss:
+            tuner = self.p_tuner(key=self.key, initial_val=val[self.key], diff=self.fine, curr=self.curr | val, f=self.f)
+            best_p, cmds, val_loss = tuner.optimize()
+            val |= best_p
+            commands.extend(cmds)
+        return val, commands, val_loss  # All commands tuner ordered are necessary.
+
+    def next_value(self):
+        nxt_lr = dict(self.values[-1])
+        nxt_lr['lr'] *= self.factor
+        if nxt_lr[self.key] is None:
+            nxt_lr[self.key] = 1.0
+        nxt_lr[self.key] += self.comp
+        return nxt_lr, True
+
+    def prev_value(self):
+        prev_lr = dict(self.values[0])
+        prev_lr['lr'] /= self.factor
+        if prev_lr[self.key] is None:
+            prev_lr[self.key] = 1.0
+        prev_lr[self.key] -= self.comp
+        prev_lr[self.key] = max(prev_lr[self.key], self.coarse)
+        return prev_lr, True
+
+
 class JointCsqLRTuner(AutoTuner):
     """Jointly tune c_sq and lr based on rel. LR"""
     def __init__(self, factor, curr, f):
@@ -272,6 +364,57 @@ best_val = {'nesterov': '', 'momentum': 0.02, 'lr': 0.015701685290756325}
 
 default |= curr
 default |= best_val
+
+file_prefix = 'rerun_'
+
+with open(file_prefix + "power.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Polynomial decay power tuning:", file=f)
+
+    key = 'power'
+    initial_value = {key: default[key], 'lr': default['lr']}
+    tuner = LRPowerAutoTuner(
+        factor=2**0.5, initial_value=initial_value, comp=0.5, p_tuner=PowerAutoTuner, key=key, coarse=0.2, fine=0.1, curr=default, f=f)
+    power_default, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
+
+with open(file_prefix + "cos_power.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Cosine decay power tuning:", file=f)
+
+    # According to corrected_cosine_power_comparison.sh the best default gen. cos hyperparameters:
+    # Standard power (1.0), 1/sqrt(2) max. lr of that of the best default gen. power hypermeters
+    default['power'] = None
+    default['lr'] /= 2**0.5
+
+    key = 'cos_power'
+    initial_val = 1.0
+    initial_value = {key: initial_val, 'lr': default['lr']}
+    tuner = LRPowerAutoTuner(
+        factor=2**0.5, initial_value=initial_value, comp=0.5, p_tuner=CosPowerAutoTuner, key=key, coarse=0.2, fine=0.1, curr=default, f=f)
+    default, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
+
+with open(file_prefix + "cosine_power_comparison.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Cosine vs. polynomial decay:", file=f)
+
+    initial_values = [{'cos_power': default['cos_power'], 'lr': default['lr']}]
+    initial_values.append({'power': power_default['power'], 'lr': power_default['lr']})
+    default['cos_power'] = None
+
+    tuner = AutoTuner(initial_values=initial_values, curr=default, f=f)
+    default, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
 
 with open("rel_lr.sh", "w") as f:
     print(preface, file=f)
