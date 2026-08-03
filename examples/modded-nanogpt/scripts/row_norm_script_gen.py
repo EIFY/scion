@@ -250,7 +250,6 @@ class JointCsqLRTuner(AutoTuner):
 
 
 # None is tombstone value, '' (empty string) is for store_true flags
-# TODO: Update with the optimized default
 default = dict(
     row_norm=None,
     steps=BUDGET,
@@ -264,9 +263,15 @@ default = dict(
     nesterov=None,
     cos_power=None,
     power=None,
-    timescale_inv=None,
     sign_mo=None,
 )
+
+# Taken from corrected_mo_baseline_comparison.sh
+curr = {'steps': 30250, 'corrected': '', 'momentum': 0.02, 'lr': 0.015125657182366296, 'sign_lr': 0.732421875, 'c_sq': 4.100045423139771, 'wd': None, 'sign_wd': 0.0003333333333333333, 'nesterov': None, 'cos_power': None, 'power': 2.1, 'sign_mo': None}
+best_val = {'nesterov': '', 'momentum': 0.02, 'lr': 0.015701685290756325}
+
+default |= curr
+default |= best_val
 
 with open("rel_lr.sh", "w") as f:
     print(preface, file=f)
