@@ -254,12 +254,12 @@ class Hyperparameters:
     n_head : int = 6 # set as n_embd/128 so head_dim is 128
     n_embd : int = 768
     momentum : float = 0.1
-    q : float = 0.0
+    mdc : float = 0.0 # Momentum decay constant
     end_c_sq_mul : float = 1.0
     cautious : bool = False
     nesterov : bool = False
-    sign_mo : Optional[float] = None # Momentum for sign paramters, defaults to momentum
-    sign_ne : Optional[bool] = None # Nesterov or not for sign parameters, defaults to nesterov
+    s_mo : Optional[float] = None # Momentum for sign paramters, defaults to momentum
+    s_ne : Optional[bool] = None # Nesterov or not for sign parameters, defaults to nesterov
 from datargs import parse
 
 def main():
@@ -306,11 +306,11 @@ def main():
     if not args.steps:
         args.steps = train_loader.nstep_total
 
-    if args.sign_mo is None:
-        args.sign_mo = args.momentum
+    if args.s_mo is None:
+        args.s_mo = args.momentum
 
-    if args.sign_ne is None:
-        args.sign_ne = args.nesterov
+    if args.s_ne is None:
+        args.s_ne = args.nesterov
 
     train_gen = train_loader.token_generator(args.seed)
     x, y = next(train_gen)
@@ -344,8 +344,8 @@ def main():
             'lr': args.sign_lr,
             'corrected': False,
             'weight_decay': args.sign_wd,
-            'momentum': args.sign_mo,
-            'nesterov': args.sign_ne,
+            'momentum': args.s_mo,
+            'nesterov': args.s_ne,
         }
     ]
 
@@ -372,7 +372,7 @@ def main():
     lr_ratio = cosine_lr if args.power is None else polynomial_lr
 
     def momentum(step):
-        return args.momentum * (1 / (1 + step * args.q))
+        return args.momentum * math.exp(-args.mdc * step)
 
     def scheduler(group, step):
         ratio = lr_ratio(step)

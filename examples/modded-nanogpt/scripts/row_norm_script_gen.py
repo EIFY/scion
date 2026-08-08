@@ -35,11 +35,11 @@ def read_final_loss(p, steps):
     ckpt_path = os.path.join(p, LAST_CKPT)
     val_loss = None
     if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, weights_only=True)
+        ckpt = torch.load(ckpt_path, weights_only=False)
         val_loss = ckpt['val_loss']
     return val_loss
 
-branch = 'log-time'
+branch = 'exp-time'
 
 preface = f"""#!/bin/bash
 
@@ -231,6 +231,32 @@ def prev_mo(mo):
     return mo.normalize()
 
 
+class MomentumAutoTuner(AutoTuner):
+
+    def __init__(self, curr, f):
+        self.nesterov = curr.get('nesterov') == ''
+        self.lr_eff = curr['lr'] * lr_factor(curr['momentum'], nesterov=self.nesterov)
+        init_val = {
+            'momentum': decimal.Decimal(str(curr['momentum'])),  # Floating-point precision workaround
+            'lr': curr['lr'],
+        }
+        super().__init__(initial_values=[init_val], curr=curr, f=f)
+
+    def next_value(self):
+        mo = self.values[-1]['momentum']
+        if mo == 1.0:
+            return None, False
+        mo = next_mo(mo)
+        lr = self.lr_eff / lr_factor(momentum=float(mo), nesterov=self.nesterov)
+        return dict(momentum=mo, lr=lr), True
+
+    def prev_value(self):
+        mo = self.values[0]['momentum']
+        mo = prev_mo(mo)
+        lr = self.lr_eff / lr_factor(momentum=float(mo), nesterov=self.nesterov)
+        return dict(momentum=mo, lr=lr), True
+
+
 class PowerAutoTuner(AutoTuner):
 
     def __init__(self, key, initial_val, diff, curr, f):
@@ -341,6 +367,66 @@ class JointCsqLRTuner(AutoTuner):
         return prev_val, True
 
 
+class MoDecayConstAutoTuner(AutoTuner):
+
+    def __init__(self, diff, curr, f):
+        self.key = 'mdc'
+        self.diff = diff
+        initial_val = curr.get(self.key)
+        if type(initial_val) is float and almost_eq(initial_val, 0.0):
+            initial_val = None
+        super().__init__(initial_values=[{self.key: initial_val}], curr=curr, f=f)
+
+    def next_value(self):
+        const = self.values[-1].get(self.key) or 0.0
+        const += self.diff
+        return {self.key: const}, True
+
+    def prev_value(self):
+        const = self.values[0].get(self.key) or 0.0
+        if almost_eq(const, 0.0):
+            return None, False
+        const -= self.diff
+        if const < 0.0:
+            const = 0.0
+        if almost_eq(const, 0.0):
+            const = None
+        return {self.key: const}, True
+
+
+class MoschAutoTuner(MomentumAutoTuner):
+    """Nested AutoTuner for momentum schedule"""
+    def __init__(self, diff, curr, f):
+        self.key = 'mdc'
+        self.diff = diff
+        super().__init__(curr, f)
+        self.s_mo = self.curr.get('s_mo')
+        if self.s_mo is None:
+            self.s_mo = self.curr['momentum']
+
+    def test_value(self, val):
+        commands = [f"# Inner {self.key} optimization:"]
+        const_tuner = MoDecayConstAutoTuner(self.diff, self.curr | val, self.f)
+        best_const, cmds, val_loss = const_tuner.optimize()
+        val |= best_const
+        commands.extend(cmds)
+        return val, commands, val_loss  # All commands const_tuner ordered are necessary.
+
+    def set_s_mo(self, val):
+        """Set s_mo when necessary to keep it constant throughout tuning"""
+        val['s_mo'] = None if almost_eq(self.s_mo, val['momentum']) else self.s_mo
+
+    def next_value(self):
+        nxt, ok = super().next_value()
+        if ok: self.set_s_mo(nxt)
+        return nxt, ok
+
+    def prev_value(self):
+        prev, ok = super().prev_value()
+        if ok: self.set_s_mo(prev)
+        return prev, ok
+
+
 # None is tombstone value, '' (empty string) is for store_true flags
 default = dict(
     row_norm=None,
@@ -355,11 +441,12 @@ default = dict(
     nesterov=None,
     cos_power=None,
     power=None,
-    sign_mo=None,
+    mdc=None,
+    s_mo=None,
 )
 
-# Taken from corrected_mo_baseline_comparison.sh
-curr = {'steps': 30250, 'corrected': '', 'momentum': 0.02, 'lr': 0.015125657182366296, 'sign_lr': 0.732421875, 'c_sq': 4.100045423139771, 'wd': None, 'sign_wd': 0.0003333333333333333, 'nesterov': None, 'cos_power': None, 'power': 2.1, 'sign_mo': None}
+# Modified from corrected_mo_baseline_comparison.sh
+curr = {'corrected': '', 'momentum': 0.02, 'lr': 0.015125657182366296, 'sign_lr': 0.732421875, 'c_sq': 4.100045423139771, 'wd': None, 'sign_wd': 0.0003333333333333333, 'nesterov': None, 'cos_power': None, 'power': 2.1}
 best_val = {'nesterov': '', 'momentum': 0.02, 'lr': 0.015701685290756325}
 
 default |= curr
@@ -412,6 +499,49 @@ with open(file_prefix + "cosine_power_comparison.sh", "w") as f:
 
     tuner = AutoTuner(initial_values=initial_values, curr=default, f=f)
     default, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
+
+with open(file_prefix + "full.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# With all the training tokens:", file=f)
+    full = dict(default)
+    full['steps'] = None
+    cmd, final_val_loss = test_params(curr=full)
+    print(cmd, file=f)
+
+if not final_val_loss:
+    sys.exit()
+
+corrected_default = dict(default)
+
+with open(file_prefix + "mosch.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Momentum scheduling!", file=f)
+
+    steps = curr.get('steps') or N_STEP
+    # 1/factor = exp(-const * steps)
+    # factor = exp(const * steps)
+    # log(factor) = const * steps
+    # const = log(factor) / steps
+    diff = math.log(2) / 2 / steps
+    tuner = MoschAutoTuner(diff=diff, curr=corrected_default, f=f)
+    corrected_default, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
+
+with open(file_prefix + "mosch_full.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Does the optimal decay const stay the same?", file=f)
+    full = dict(corrected_default)
+    full['steps'] = None
+    tuner = MoDecayConstAutoTuner(diff=diff, curr=full, f=f)
+    full, final_val_loss = tuner.run()
 
 if not final_val_loss:
     sys.exit()

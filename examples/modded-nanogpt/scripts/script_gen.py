@@ -442,7 +442,7 @@ class MoschAutoTuner(MomentumAutoTuner):
         best_ratio, cmds, val_loss = ratio_tuner.optimize()
         val |= best_ratio
         commands.extend(cmds)
-        return val, commands, val_loss  # All commoands ratio_tuner ordered are necessary.
+        return val, commands, val_loss  # All commands ratio_tuner ordered are necessary.
 
     def set_sign_mo(self, val):
         """Set sign_mo when necessary to keep it constant throughout tuning"""
@@ -696,30 +696,6 @@ for default['corrected'] in ('', None):
         sys.exit()
 
     if default.get('corrected') == '':
-
-        corrected_default = dict(default)
-
-        with open(file_prefix + "mosch.sh", "w") as f:
-
-            print(preface, file=f)
-            print("# Momentum scheduling!", file=f)
-            tuner = MoschAutoTuner(factor=2 ** 0.5, curr=corrected_default, f=f)
-            corrected_default, final_val_loss = tuner.run()
-
-        if not final_val_loss:
-            sys.exit()
-
-        with open(file_prefix + "mosch_full.sh", "w") as f:
-
-            print(preface, file=f)
-            print("# Does the log-time factor stay the same as expected?", file=f)
-            full = dict(corrected_default)
-            full['steps'] = None
-            tuner = EndMoRatioAutoTuner(factor=2 ** 0.5, curr=full, f=f)
-            full, final_val_loss = tuner.run()
-
-        if not final_val_loss:
-            sys.exit()
 
         # Prepare uncorrected default
         c_sq = default['c_sq']
