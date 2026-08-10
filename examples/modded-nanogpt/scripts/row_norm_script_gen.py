@@ -503,49 +503,6 @@ with open(file_prefix + "cosine_power_comparison.sh", "w") as f:
 if not final_val_loss:
     sys.exit()
 
-with open(file_prefix + "full.sh", "w") as f:
-
-    print(preface, file=f)
-    print("# With all the training tokens:", file=f)
-    full = dict(default)
-    full['steps'] = None
-    cmd, final_val_loss = test_params(curr=full)
-    print(cmd, file=f)
-
-if not final_val_loss:
-    sys.exit()
-
-corrected_default = dict(default)
-
-with open(file_prefix + "mosch.sh", "w") as f:
-
-    print(preface, file=f)
-    print("# Momentum scheduling!", file=f)
-
-    steps = curr.get('steps') or N_STEP
-    # 1/factor = exp(-const * steps)
-    # factor = exp(const * steps)
-    # log(factor) = const * steps
-    # const = log(factor) / steps
-    diff = math.log(2) / 2 / steps
-    tuner = MoschAutoTuner(diff=diff, curr=corrected_default, f=f)
-    corrected_default, final_val_loss = tuner.run()
-
-if not final_val_loss:
-    sys.exit()
-
-with open(file_prefix + "mosch_full.sh", "w") as f:
-
-    print(preface, file=f)
-    print("# Does the optimal decay const stay the same?", file=f)
-    full = dict(corrected_default)
-    full['steps'] = None
-    tuner = MoDecayConstAutoTuner(diff=diff, curr=full, f=f)
-    full, final_val_loss = tuner.run()
-
-if not final_val_loss:
-    sys.exit()
-
 with open("rel_lr.sh", "w") as f:
     print(preface, file=f)
     print("# Near-scale-invariant relative LR:", file=f)
@@ -562,6 +519,50 @@ with open("rel_lr.sh", "w") as f:
             print(cmd, file=f)
 
 if not all(losses.values()):
+    sys.exit()
+
+(default['lr'], default['c_sq']), best_val_loss = min(losses.items(), key=lambda t: t[-1])
+print(f"best: {default['lr']=}, {default['c_sq']=}, {best_val_loss=}")
+
+with open(file_prefix + "full.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# With all the training tokens:", file=f)
+    full = dict(default)
+    full['steps'] = None
+    cmd, final_val_loss = test_params(curr=full)
+    print(cmd, file=f)
+
+if not final_val_loss:
+    sys.exit()
+
+with open(file_prefix + "mosch.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Momentum scheduling!", file=f)
+
+    steps = curr.get('steps') or N_STEP
+    # 1/factor = exp(-const * steps)
+    # factor = exp(const * steps)
+    # log(factor) = const * steps
+    # const = log(factor) / steps
+    diff = math.log(2) / 2 / steps
+    tuner = MoschAutoTuner(diff=diff, curr=default, f=f)
+    mosch_default, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
+
+with open(file_prefix + "mosch_full.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# Does the optimal decay const stay the same?", file=f)
+    mosch_full = dict(mosch_default)
+    mosch_full['steps'] = None
+    tuner = MoDecayConstAutoTuner(diff=diff, curr=mosch_full, f=f)
+    mosch_full, final_val_loss = tuner.run()
+
+if not final_val_loss:
     sys.exit()
 
 branch = 'row-norm'
