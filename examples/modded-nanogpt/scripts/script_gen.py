@@ -432,9 +432,9 @@ class MoschAutoTuner(MomentumAutoTuner):
         self.key = 'q'
         self.factor = factor
         super().__init__(curr, f)
-        self.sign_mo = self.curr.get('sign_mo')
-        if self.sign_mo is None:
-            self.sign_mo = self.curr['momentum']
+        self.s_mo = self.curr.get('s_mo')
+        if self.s_mo is None:
+            self.s_mo = self.curr['momentum']
 
     def test_value(self, val):
         commands = [f"# Inner {self.key} optimization:"]
@@ -444,22 +444,22 @@ class MoschAutoTuner(MomentumAutoTuner):
         commands.extend(cmds)
         return val, commands, val_loss  # All commoands ratio_tuner ordered are necessary.
 
-    def set_sign_mo(self, val):
-        """Set sign_mo when necessary to keep it constant throughout tuning"""
-        val['sign_mo'] = None if almost_eq(self.sign_mo, val['momentum']) else self.sign_mo
+    def set_s_mo(self, val):
+        """Set s_mo when necessary to keep it constant throughout tuning"""
+        val['s_mo'] = None if almost_eq(self.s_mo, val['momentum']) else self.s_mo
 
     def next_value(self):
         nxt, ok = super().next_value()
         if ok:
             nxt[self.key] = copy_end_mo(self.values[-1], nxt['momentum'], self.key)
-            self.set_sign_mo(nxt)
+            self.set_s_mo(nxt)
         return nxt, ok
 
     def prev_value(self):
         prev, ok = super().prev_value()
         if ok:
             prev[self.key] = copy_end_mo(self.values[0], prev['momentum'], self.key)
-            self.set_sign_mo(prev)
+            self.set_s_mo(prev)
         return prev, ok
 
 
@@ -477,7 +477,7 @@ default = dict(
     cos_power=None,
     power=None,
     q=None,
-    sign_mo=None,
+    s_mo=None,
 )
 
 # old_open = open
