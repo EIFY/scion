@@ -559,6 +559,7 @@ with open(file_prefix + "mosch_full.sh", "w") as f:
     print("# Does the optimal decay const stay the same?", file=f)
     mosch_full = dict(mosch_default)
     mosch_full['steps'] = None
+    mosch_full['momentum'] = float(mosch_full['momentum'])
     tuner = MoschAutoTuner(diff=diff, curr=mosch_full, f=f)
     mosch_full, final_val_loss = tuner.run()
 
