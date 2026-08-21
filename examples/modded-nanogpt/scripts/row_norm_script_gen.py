@@ -418,12 +418,16 @@ class MoschAutoTuner(MomentumAutoTuner):
 
     def next_value(self):
         nxt, ok = super().next_value()
-        if ok: self.set_s_mo(nxt)
+        if ok:
+            self.set_s_mo(nxt)
+            nxt_val[self.key] = self.values[-1].get(self.key)
         return nxt, ok
 
     def prev_value(self):
         prev, ok = super().prev_value()
-        if ok: self.set_s_mo(prev)
+        if ok:
+            self.set_s_mo(prev)
+            prev[self.key] = self.values[0].get(self.key)
         return prev, ok
 
 
