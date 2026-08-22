@@ -431,6 +431,85 @@ class MoschAutoTuner(MomentumAutoTuner):
         return prev, ok
 
 
+class EndMoRatioAutoTuner(AutoTuner):
+
+    def __init__(self, factor, curr, f):
+        self.key = 'q'
+        self.factor = factor
+        self.max_ratio = 1 / float(curr['momentum'])  # Doesn't make sense to have momentum > 1, right?
+        super().__init__(initial_values=[{self.key: curr.get(self.key)}], curr=curr, f=f)
+
+    def next_value(self):
+        inv = self.values[-1].get(self.key) or 0.0
+        steps = self.curr.get('steps') or N_STEP
+        curr_ratio = 1 / (1 + steps * inv)
+        prev_ratio = curr_ratio / self.factor
+        new_inv = (1/prev_ratio - 1.) / steps
+        if almost_eq(new_inv, 0.0):
+            new_inv = None
+        return {self.key: new_inv}, True
+
+    def prev_value(self):
+        inv = self.values[0].get(self.key) or 0.0
+        steps = self.curr.get('steps') or N_STEP
+        curr_ratio = 1 / (1 + steps * inv)
+        if almost_eq(curr_ratio, self.max_ratio):
+            return None, False
+        next_ratio = min(curr_ratio * self.factor, self.max_ratio)
+        new_inv = (1/next_ratio - 1.) / steps
+        if almost_eq(new_inv, 0.0):
+            new_inv = None
+        return {self.key: new_inv}, True
+
+
+def copy_end_mo(curr, new_mo, key='q'):
+    inv = curr.get(key) or 0.0
+    steps = curr.get('steps') or N_STEP
+    end_mo = float(curr['momentum']) / (1. + steps * inv)
+    # new_mo / (1 + steps * inv) = end_mo
+    # new_mo / end_mo = 1 + steps * inv
+    # inv = (new_mo / end_mo - 1) / steps
+    new_inv = (float(new_mo) / end_mo - 1.) / steps
+    return None if almost_eq(new_inv, 0.0) else new_inv
+
+
+class LogTimeMoschAutoTuner(MomentumAutoTuner):
+    """Nested AutoTuner for momentum schedule"""
+    def __init__(self, factor, curr, f):
+        self.key = 'q'
+        self.factor = factor
+        super().__init__(curr, f)
+        self.s_mo = self.curr.get('s_mo')
+        if self.s_mo is None:
+            self.s_mo = self.curr['momentum']
+
+    def test_value(self, val):
+        commands = [f"# Inner {self.key} optimization:"]
+        ratio_tuner = EndMoRatioAutoTuner(self.factor, self.curr | val, self.f)
+        best_ratio, cmds, val_loss = ratio_tuner.optimize()
+        val |= best_ratio
+        commands.extend(cmds)
+        return val, commands, val_loss  # All commoands ratio_tuner ordered are necessary.
+
+    def set_s_mo(self, val):
+        """Set s_mo when necessary to keep it constant throughout tuning"""
+        val['s_mo'] = None if almost_eq(self.s_mo, val['momentum']) else self.s_mo
+
+    def next_value(self):
+        nxt, ok = super().next_value()
+        if ok:
+            nxt[self.key] = copy_end_mo(self.values[-1], nxt['momentum'], self.key)
+            self.set_s_mo(nxt)
+        return nxt, ok
+
+    def prev_value(self):
+        prev, ok = super().prev_value()
+        if ok:
+            prev[self.key] = copy_end_mo(self.values[0], prev['momentum'], self.key)
+            self.set_s_mo(prev)
+        return prev, ok
+
+
 # None is tombstone value, '' (empty string) is for store_true flags
 default = dict(
     row_norm=None,
@@ -446,6 +525,7 @@ default = dict(
     cos_power=None,
     power=None,
     mdc=None,
+    q=None,
     s_mo=None,
 )
 
@@ -565,6 +645,29 @@ with open(file_prefix + "mosch_full.sh", "w") as f:
     mosch_full['steps'] = None
     mosch_full['momentum'] = float(mosch_full['momentum'])
     tuner = MoschAutoTuner(diff=diff, curr=mosch_full, f=f)
+    mosch_full, final_val_loss = tuner.run()
+
+if not final_val_loss:
+    sys.exit()
+
+branch = 'log-time'
+
+preface = f"""#!/bin/bash
+
+TRAIN={os.path.join(GPT_DIR, "train.py")}
+PYTHON="{PYTHON}"
+
+git -C {REPO} checkout {branch}
+"""
+
+with open(file_prefix + "log_time_mosch_full.sh", "w") as f:
+
+    print(preface, file=f)
+    print("# How about log-time decay?", file=f)
+    mosch_full = dict(full)
+    mosch_full['momentum'] = float(mosch_full['momentum'])
+    factor = 2 ** (N_STEP / BUDGET / 2)  # Same granularity as the exp-time counterpart
+    tuner = LogTimeMoschAutoTuner(factor=factor, curr=mosch_full, f=f)
     mosch_full, final_val_loss = tuner.run()
 
 if not final_val_loss:
