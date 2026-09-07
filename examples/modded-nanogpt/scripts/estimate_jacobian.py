@@ -130,13 +130,19 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying # CHANGE
+        self.transformer.wte.requires_grad = False
+
+    def init_random_vector(self, b, t, n_embd):
+        p = self.transformer.wte.weight
+        self.register_buffer('random_vector', torch.empty((b, t, n_embd), dtype=p.dtype, device=p.device))
 
     def forward(self, idx):
         # Just the output embeddings
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         for block in self.transformer.h:
             x = block(x)
-        return F.rms_norm(x, (x.size(-1),))
+        x = F.rms_norm(x, (x.size(-1),))
+        return torch.sum(x * self.random_vector)
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -222,8 +228,8 @@ class Hyperparameters:
     input_bin : str = 'data/fineweb-edu100B/fineweb_edu_train_*.bin' # input .bin to train on
     input_val_bin : str = 'data/fineweb-edu100B/fineweb_edu_val_*.bin' # input .bin to eval validation loss on
     # optimization hyperparams
-    batch_size : int = 16 # batch size, in sequences, across all devices
-    device_batch_size : int = 16 # batch size, in sequences, per device
+    batch_size : int = 32 # batch size, in sequences, across all devices
+    device_batch_size : int = 32 # batch size, in sequences, per device
     sequence_length : int = 1024 # sequence length, in tokens
     steps : int = 0 # number of iterations to run. Defaults to 1 epoch
     seed : Optional[int] = None # change to an int to shuffle files and offsets
@@ -255,25 +261,16 @@ from datargs import parse
 def norm_info(state_dict):
     count = 0
     hidden = 0.
+    exclude = ['transformer.wte.weight', 'lm_head.weight']
+    prefix = '_orig_mod.'
+    exclude = tuple(prefix + n for n in exclude)
     for n, p in state_dict.items():
-        if n == '_orig_mod.transformer.wte.weight': # weight-tying this is identical to _orig_mod.lm_head.weight
-            continue
-        elif n == '_orig_mod.lm_head.weight':
+        if n in exclude:
             continue
         else:
             count += p.numel()
             hidden += torch.sum(p ** 2).item()
     return count, hidden
-
-def perturb(state_dict, std):
-    for n, p in state_dict.items():
-        if n == '_orig_mod.transformer.wte.weight': # weight-tying this is identical to _orig_mod.lm_head.weight
-            continue
-        elif n == '_orig_mod.lm_head.weight':
-            continue
-        else:
-            p += torch.randn_like(p) * std
-    return
 
 def main():
 
@@ -318,6 +315,7 @@ def main():
     # this originates from Karpathy's experiments.
     num_vocab = 50304
     model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd))
+    model.init_random_vector(B, T, args.n_embd)
     model = model.cuda()
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True # suggested by @Chillee
@@ -329,34 +327,30 @@ def main():
     state_dict = ckpt['model']
     count, norm_squared = norm_info(state_dict)
     print(f"{count=} {math.sqrt(norm_squared)=}")
-
+    p = state_dict['_orig_mod.' + 'transformer.wte.weight']
+    size = (B, T, args.n_embd)
+    state_dict['_orig_mod.random_vector'] = 2 * torch.randint(0, 2, size=size, dtype=p.dtype, device=p.device) - 1
     model.load_state_dict(state_dict)
     model = DDP(model, device_ids=[ddp_local_rank])
     
-    perturbed_model = GPT(GPTConfig(vocab_size=num_vocab, n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd))
-    perturbed_model = perturbed_model.cuda()
-    perturbed_model = torch.compile(perturbed_model)
-    rms = math.sqrt(norm_squared / count)
-    std = rms * 1e-6
-    print(std)
-    perturb(state_dict, std)
-    perturbed_model.load_state_dict(state_dict)
-    perturbed_model = DDP(perturbed_model, device_ids=[ddp_local_rank])
-
     ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
     # run validation batches
     model.eval()
-    perturbed_model.eval()
     val_gen = val_loader.token_generator()
     total = 0.0
     for _ in range(val_steps):
         x_val, _ = next(val_gen)
-        with (ctx, torch.no_grad()):
-            total += torch.sum((model(x_val) - perturbed_model(x_val)) ** 2).item()
+        with ctx:
+            loss = model(x_val)
+        loss.backward()
+        # Hutchinson's trace estimator for the Frobenius norm of the (B*T*n_embd, n_of_paramters) Jacobian matrix
+        l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm).item()
+        total += l2_grads
+        model.zero_grad()
 
-    jacob_norm_squared = total / (val_steps * args.batch_size * args.sequence_length * std ** 2)
-    print(f"{math.sqrt(jacob_norm_squared)=}")
+    mean_jacob_norm = total / val_steps / math.sqrt(B * T)
+    print(f"{mean_jacob_norm=}")
 
     # clean up nice
     dist.destroy_process_group()
