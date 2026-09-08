@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import math
+import pickle
 import random
 import numpy as np
 import torch
@@ -272,6 +273,19 @@ def norm_info(state_dict):
             hidden += torch.sum(p ** 2).item()
     return count, hidden
 
+def run_name(opt, d):
+    l = [opt] if opt else []
+    for k, v in d.items():
+        if v is not None:
+            l.append(k)
+            if v != '':
+                if type(v) is float:
+                    v = f"{v:.3g}"
+                else:
+                    v = str(v)
+                l.append(v)
+    return '-'.join(l)
+
 def main():
 
     args = parse(Hyperparameters)
@@ -320,41 +334,59 @@ def main():
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True # suggested by @Chillee
     model = torch.compile(model)
-
-    print(args.name)
-    resume = os.path.join("logs", args.name, "state_step030250.pt")
-    ckpt = torch.load(resume, weights_only=False)
-    state_dict = ckpt['model']
-    count, norm_squared = norm_info(state_dict)
-    print(f"{count=} {math.sqrt(norm_squared)=}")
-    p = state_dict['_orig_mod.' + 'transformer.wte.weight']
-    size = (B, T, args.n_embd)
-    state_dict['_orig_mod.random_vector'] = 2 * torch.randint(0, 2, size=size, dtype=p.dtype, device=p.device) - 1
-    model.load_state_dict(state_dict)
     model = DDP(model, device_ids=[ddp_local_rank])
-    
-    ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
 
-    # run validation batches
-    model.eval()
-    val_gen = val_loader.token_generator()
-    total = 0.0
-    for _ in range(val_steps):
-        x_val, _ = next(val_gen)
-        with ctx:
-            loss = model(x_val)
-        loss.backward()
-        # Hutchinson's trace estimator for the Frobenius norm of the (B*T*n_embd, n_of_paramters) Jacobian matrix
-        l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm).item()
-        total += l2_grads
-        model.zero_grad()
+    # Best modded-nanogpt hyperparameters w/ optimized LR schedule, taken from rerun_cosine_power_comparison.sh
+    default = {'row_norm': None, 'steps': 30250, 'corrected': '', 'momentum': 0.02, 'lr': 0.011102768145150864, 'sign_lr': 0.732421875, 'c_sq': 4.100045423139771, 'wd': None, 'sign_wd': 0.0003333333333333333, 'nesterov': '', 'cos_power': None, 'power': None, 'sign_mo': None} | {'power': 1.2, 'lr': 0.011102768145150864}
+    opt = ''
 
-    mean_jacob_norm = total / val_steps / math.sqrt(B * T)
-    print(f"{mean_jacob_norm=}")
+    res = {}
+    curr = dict(default)
+    factors = [0.5, 2**-0.5, 1., 2**0.5, 2.0]
+    size = (B, T, args.n_embd)
+
+    for lr_f in factors:
+        for c_sq_f in factors:
+            curr['lr'] = lr_f * math.sqrt(c_sq_f) * default['lr']
+            curr['c_sq'] = c_sq_f * default['c_sq']
+            args.name = run_name(opt, curr)
+            print(args.name)
+            res[args.name] = {}
+            resume = os.path.join("logs", args.name, "state_step030250.pt")
+            ckpt = torch.load(resume, weights_only=False)
+            state_dict = ckpt['model']
+            count, norm_squared = norm_info(state_dict)
+            res[args.name]['hidden'] = math.sqrt(norm_squared)
+            print(f"{count=} {res[args.name]['hidden']=}")
+            p = state_dict['_orig_mod.' + 'transformer.wte.weight']
+            state_dict['_orig_mod.random_vector'] = 2 * torch.randint(0, 2, size=size, dtype=p.dtype, device=p.device) - 1
+            model.module.load_state_dict(state_dict)
+
+            ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
+
+            # run validation batches
+            model.eval()
+            val_gen = val_loader.token_generator()
+            total = 0.0
+            for _ in range(val_steps):
+                x_val, _ = next(val_gen)
+                with ctx:
+                    loss = model(x_val)
+                loss.backward()
+                # Hutchinson's trace estimator for the Frobenius norm of the (B*T*n_embd, n_of_paramters) Jacobian matrix
+                l2_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm).item()
+                total += l2_grads
+                model.zero_grad()
+
+            res[args.name]['jacobian'] = total / val_steps / math.sqrt(B * T)
+            print(f"{res[args.name]['jacobian']=}")
 
     # clean up nice
     dist.destroy_process_group()
 
+    filename = 'gpt_jacobian_norms.pkl'
+    with open(filename, 'wb') as file:
+        pickle.dump(res, file)
 
 if __name__ == '__main__':
     main()
