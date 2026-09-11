@@ -401,13 +401,18 @@ mosch_full['momentum'] = float(mosch_full['momentum'])
 diff = math.log(2) / 2 / BUDGET
 tuner = MoschAutoTuner(diff=diff, curr=mosch_full, f=file_like)
 mosch_full, final_val_loss = tuner.run()
+res1 = tuner.res
 
+mosch_full = dict(default)
+mosch_full['momentum'] = float(mosch_full['momentum'])
+factor = 2 ** (N_STEP / BUDGET / 2)  # Same granularity as the exp-time counterpart
+tuner = LogTimeMoschAutoTuner(factor=factor, curr=mosch_full, f=file_like)
+mosch_full, final_val_loss = tuner.run()
+res2 = tuner.res
 
-def mosch_plot(res, ax):
+def mosch_plot(res, ax, colors):
     table = sorted(res.items())
-    cmap = mpl.colormaps['viridis']
-    colors = cmap(np.linspace(0, 1, len(table)))
-
+    colors = [colors[mo] for mo, _ in table]
     x, y = [], []
     for (mo, (end_mo, losses)), color in zip(table, colors):
         ax.plot(end_mo, losses, color=color, label=f"$\\alpha = {mo}$")
@@ -421,15 +426,12 @@ def mosch_plot(res, ax):
     ax.set(xlabel='End momentum $\\alpha$')
     ax.set(ylabel='Val. loss')
 
-mosch_plot(tuner.res, ax1)
+mos = sorted(res1 | res2)
+cmap = mpl.colormaps['viridis']
+colors = dict(zip(mos, cmap(np.linspace(0, 1, len(mos)))))
 
-mosch_full = dict(default)
-mosch_full['momentum'] = float(mosch_full['momentum'])
-factor = 2 ** (N_STEP / BUDGET / 2)  # Same granularity as the exp-time counterpart
-tuner = LogTimeMoschAutoTuner(factor=factor, curr=mosch_full, f=file_like)
-mosch_full, final_val_loss = tuner.run()
-
-mosch_plot(tuner.res, ax2)
+mosch_plot(res1, ax1, colors)
+mosch_plot(res2, ax2, colors)
 
 plt.tight_layout()
 plt.savefig('mosch_plot.png')
