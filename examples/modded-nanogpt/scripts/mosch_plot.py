@@ -414,13 +414,19 @@ def mosch_plot(res, ax, colors):
     table = sorted(res.items())
     colors = [colors[mo] for mo, _ in table]
     x, y = [], []
+    const_mo = []
     for (mo, (end_mo, losses)), color in zip(table, colors):
+        if mo in end_mo:
+            const_mo.append((mo, losses[end_mo.index(mo)], color))
         ax.plot(end_mo, losses, color=color, label=f"$\\alpha = {mo}$")
         i = min(range(len(losses)), key=lambda i: losses[i])
         x.append(end_mo[i])
         y.append(losses[i])
 
     ax.scatter(x, y, s=20, edgecolors=colors, facecolors='w', zorder=10, clip_on=False)
+    if const_mo:
+        x, y, colors = zip(*const_mo)
+        ax.scatter(x, y, s=20, edgecolors=colors, facecolors='w', marker='^', zorder=10, clip_on=False)
     ax.set_xscale('log')
     ax.legend()
     ax.set(xlabel='End momentum $\\alpha$')
